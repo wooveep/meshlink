@@ -6,7 +6,8 @@
 2. 已完成：设备注册、Overlay 地址分配、最小配置同步闭环。
 3. 已完成：`SyncConfig` 双客户端发现与客户端 peer cache。
 4. 已完成：Phase 01/02 的本地 smoke 与最小 libvirt VM 实验室骨架。
-5. 下一开发重点：Linux 静态 WireGuard 建链与 VM lab 的 Phase 03 扩展。
+5. 已完成：Linux 静态 WireGuard 建链与 VM lab 的 Phase 03 扩展。
+6. 下一开发重点：STUN 探测、候选地址交换与信令打洞。
 
 ## Phase 0
 
@@ -18,7 +19,7 @@
 
 1. 已完成：实现注册与地址分配。
 2. 已完成：建立最小配置同步闭环。
-3. 进行中：跑通 Linux 静态 WireGuard 建链。
+3. 已完成：跑通 Linux 静态 WireGuard 建链。
 
 ## Phase 2
 

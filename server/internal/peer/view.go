@@ -24,7 +24,8 @@ func BuildVisiblePeers(selfID string, records []*device.Record) []*pb.Peer {
 			AllowedIps: []string{
 				record.OverlayIP + "/32",
 			},
-			PreferredPath: pb.PathType_PATH_TYPE_UNSPECIFIED,
+			PreferredPath:  pb.PathType_PATH_TYPE_UNSPECIFIED,
+			DirectEndpoint: toPBDirectEndpoint(record.DirectEndpoint),
 		})
 	}
 
@@ -33,4 +34,15 @@ func BuildVisiblePeers(selfID string, records []*device.Record) []*pb.Peer {
 	})
 
 	return peers
+}
+
+func toPBDirectEndpoint(endpoint *device.DirectEndpoint) *pb.DirectEndpoint {
+	if endpoint == nil {
+		return nil
+	}
+
+	return &pb.DirectEndpoint{
+		Host: endpoint.Host,
+		Port: endpoint.Port,
+	}
 }

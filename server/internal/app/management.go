@@ -54,6 +54,14 @@ func (s *ManagementService) RegisterDevice(ctx context.Context, req *pb.Register
 	if err := s.auth.Validate(req.GetToken()); err != nil {
 		return nil, status.Error(codes.Unauthenticated, err.Error())
 	}
+	if req.GetDirectEndpoint() != nil {
+		if req.GetDirectEndpoint().GetHost() == "" {
+			return nil, status.Error(codes.InvalidArgument, "direct_endpoint.host is required when direct_endpoint is set")
+		}
+		if req.GetDirectEndpoint().GetPort() == 0 {
+			return nil, status.Error(codes.InvalidArgument, "direct_endpoint.port is required when direct_endpoint is set")
+		}
+	}
 
 	overlayIP, err := s.allocator.Allocate(req.GetPublicKey())
 	if err != nil {
@@ -61,11 +69,12 @@ func (s *ManagementService) RegisterDevice(ctx context.Context, req *pb.Register
 	}
 
 	record := s.registry.Register(device.Registration{
-		Name:      req.GetName(),
-		PublicKey: req.GetPublicKey(),
-		OS:        req.GetOs(),
-		Version:   req.GetVersion(),
-		OverlayIP: overlayIP,
+		Name:           req.GetName(),
+		PublicKey:      req.GetPublicKey(),
+		OS:             req.GetOs(),
+		Version:        req.GetVersion(),
+		OverlayIP:      overlayIP,
+		DirectEndpoint: fromPBDirectEndpoint(req.GetDirectEndpoint()),
 	})
 
 	return &pb.RegisterDeviceResponse{
@@ -140,6 +149,29 @@ func toPBDevice(record *device.Record) *pb.Device {
 		Overlay: &pb.OverlayAddress{
 			Ipv4: record.OverlayIP,
 		},
-		Labels: map[string]string{},
+		Labels:         map[string]string{},
+		DirectEndpoint: toPBDirectEndpoint(record.DirectEndpoint),
+	}
+}
+
+func fromPBDirectEndpoint(endpoint *pb.DirectEndpoint) *device.DirectEndpoint {
+	if endpoint == nil {
+		return nil
+	}
+
+	return &device.DirectEndpoint{
+		Host: endpoint.GetHost(),
+		Port: endpoint.GetPort(),
+	}
+}
+
+func toPBDirectEndpoint(endpoint *device.DirectEndpoint) *pb.DirectEndpoint {
+	if endpoint == nil {
+		return nil
+	}
+
+	return &pb.DirectEndpoint{
+		Host: endpoint.Host,
+		Port: endpoint.Port,
 	}
 }

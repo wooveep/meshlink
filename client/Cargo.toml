@@ -28,5 +28,6 @@ tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "signal", "
 toml = "0.8"
 tonic = { version = "0.12", features = ["transport"] }
 tonic-build = "0.12"
+tempfile = "3.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

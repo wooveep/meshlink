@@ -9,7 +9,7 @@ import (
 func TestBuildVisiblePeersExcludesSelfAndSorts(t *testing.T) {
 	records := []*device.Record{
 		{ID: "dev-c", PublicKey: "pk-c", OverlayIP: "100.64.0.3"},
-		{ID: "dev-a", PublicKey: "pk-a", OverlayIP: "100.64.0.1"},
+		{ID: "dev-a", PublicKey: "pk-a", OverlayIP: "100.64.0.1", DirectEndpoint: &device.DirectEndpoint{Host: "192.0.2.10", Port: 51820}},
 		{ID: "dev-b", PublicKey: "pk-b", OverlayIP: "100.64.0.2"},
 	}
 
@@ -23,5 +23,8 @@ func TestBuildVisiblePeersExcludesSelfAndSorts(t *testing.T) {
 	}
 	if peers[0].GetAllowedIps()[0] != "100.64.0.1/32" {
 		t.Fatalf("expected allowed ip to include overlay /32, got %v", peers[0].GetAllowedIps())
+	}
+	if peers[0].GetDirectEndpoint().GetHost() != "192.0.2.10" || peers[0].GetDirectEndpoint().GetPort() != 51820 {
+		t.Fatalf("expected direct endpoint to propagate, got %+v", peers[0].GetDirectEndpoint())
 	}
 }

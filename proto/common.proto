@@ -9,6 +9,11 @@ message OverlayAddress {
   string ipv6 = 2;
 }
 
+message DirectEndpoint {
+  string host = 1;
+  uint32 port = 2;
+}
+
 message Device {
   string id = 1;
   string name = 2;
@@ -17,6 +22,7 @@ message Device {
   string os = 5;
   OverlayAddress overlay = 6;
   map<string, string> labels = 7;
+  DirectEndpoint direct_endpoint = 8;
 }
 
 message Peer {
@@ -25,6 +31,7 @@ message Peer {
   OverlayAddress overlay = 3;
   repeated string allowed_ips = 4;
   PathType preferred_path = 5;
+  DirectEndpoint direct_endpoint = 6;
 }
 
 message Candidate {

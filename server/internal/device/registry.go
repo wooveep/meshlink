@@ -9,20 +9,27 @@ import (
 )
 
 type Registration struct {
-	Name      string
-	PublicKey string
-	OS        string
-	Version   string
-	OverlayIP string
+	Name           string
+	PublicKey      string
+	OS             string
+	Version        string
+	OverlayIP      string
+	DirectEndpoint *DirectEndpoint
 }
 
 type Record struct {
-	ID        string
-	Name      string
-	PublicKey string
-	OS        string
-	Version   string
-	OverlayIP string
+	ID             string
+	Name           string
+	PublicKey      string
+	OS             string
+	Version        string
+	OverlayIP      string
+	DirectEndpoint *DirectEndpoint
+}
+
+type DirectEndpoint struct {
+	Host string
+	Port uint32
 }
 
 type Registry struct {
@@ -49,6 +56,9 @@ func (r *Registry) Register(input Registration) *Record {
 		existing.OS = input.OS
 		existing.Version = input.Version
 		existing.OverlayIP = input.OverlayIP
+		if input.DirectEndpoint != nil {
+			existing.DirectEndpoint = cloneDirectEndpoint(input.DirectEndpoint)
+		}
 		r.revision++
 		record := clone(existing)
 		revision := formatRevision(r.revision)
@@ -59,12 +69,13 @@ func (r *Registry) Register(input Registration) *Record {
 	}
 
 	record := &Record{
-		ID:        makeID(input.PublicKey),
-		Name:      input.Name,
-		PublicKey: input.PublicKey,
-		OS:        input.OS,
-		Version:   input.Version,
-		OverlayIP: input.OverlayIP,
+		ID:             makeID(input.PublicKey),
+		Name:           input.Name,
+		PublicKey:      input.PublicKey,
+		OS:             input.OS,
+		Version:        input.Version,
+		OverlayIP:      input.OverlayIP,
+		DirectEndpoint: cloneDirectEndpoint(input.DirectEndpoint),
 	}
 	r.byKey[input.PublicKey] = record
 	r.byID[record.ID] = record
@@ -126,6 +137,16 @@ func (r *Registry) Subscribe() (<-chan string, func()) {
 
 func clone(record *Record) *Record {
 	copy := *record
+	copy.DirectEndpoint = cloneDirectEndpoint(record.DirectEndpoint)
+	return &copy
+}
+
+func cloneDirectEndpoint(endpoint *DirectEndpoint) *DirectEndpoint {
+	if endpoint == nil {
+		return nil
+	}
+
+	copy := *endpoint
 	return &copy
 }
 

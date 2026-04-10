@@ -18,6 +18,7 @@ message RegisterDeviceRequest {
   string token = 3;
   string os = 4;
   string version = 5;
+  DirectEndpoint direct_endpoint = 6;
 }
 
 message RegisterDeviceResponse {

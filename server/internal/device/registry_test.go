@@ -34,6 +34,33 @@ func TestRegistryRegisterIdempotentByPublicKey(t *testing.T) {
 	}
 }
 
+func TestRegistryPreservesDirectEndpointWhenOmitted(t *testing.T) {
+	registry := NewRegistry()
+
+	registry.Register(Registration{
+		Name:      "node-a",
+		PublicKey: "pk-a",
+		OverlayIP: "100.64.0.1",
+		DirectEndpoint: &DirectEndpoint{
+			Host: "198.51.100.10",
+			Port: 51820,
+		},
+	})
+
+	record := registry.Register(Registration{
+		Name:      "node-a-new",
+		PublicKey: "pk-a",
+		OverlayIP: "100.64.0.1",
+	})
+
+	if record.DirectEndpoint == nil {
+		t.Fatal("expected direct endpoint to be preserved")
+	}
+	if record.DirectEndpoint.Host != "198.51.100.10" || record.DirectEndpoint.Port != 51820 {
+		t.Fatalf("unexpected direct endpoint: %+v", record.DirectEndpoint)
+	}
+}
+
 func TestRegistrySubscribeNotifiesOnChanges(t *testing.T) {
 	registry := NewRegistry()
 	updates, cancel := registry.Subscribe()

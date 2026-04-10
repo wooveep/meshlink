@@ -4,3 +4,6 @@ bootstrap_token = "meshlink-dev-token"
 public_key = "meshlink-client-a-public-key"
 interface_name = "sdwan0"
 log_level = "info"
+# private_key = "meshlink-client-a-private-key"
+# listen_port = 51820
+# advertise_host = "192.0.2.10"

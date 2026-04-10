@@ -203,9 +203,14 @@ manage_etc_hosts: true
 users:
   - default
   - name: $MESHLINK_SSH_USER
+    groups: [sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
       - $ssh_key
-package_update: false
+package_update: true
+packages:
+  - wireguard-tools
+  - iputils-ping
 ssh_pwauth: true
 chpasswd:
   list: |

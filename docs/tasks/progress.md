@@ -2,7 +2,7 @@
 
 ## Current milestone
 
-Phase 02 client discovery is running end to end, and the first libvirt VM lab slice is ready for Phase 01/02 verification.
+Phase 03 Linux direct tunnel now runs end to end, and the VM lab can verify both control-plane discovery and static WireGuard overlay traffic.
 
 ## Completed
 
@@ -15,15 +15,18 @@ Phase 02 client discovery is running end to end, and the first libvirt VM lab sl
 7. The Rust client caches peer views and logs added, updated, and removed peers without touching WireGuard.
 8. `phase02-smoke.sh` verifies two-client discovery over the live config stream.
 9. A repeatable libvirt lab skeleton exists for `mgmt-1`, `client-a`, and `client-b`, with scripted create/destroy/acceptance commands.
+10. Management and peer views now propagate optional static direct endpoints for Linux peering.
+11. The Rust client can register a direct endpoint, reconcile a Linux WireGuard interface, and keep peer changes idempotent without recreating the interface.
+12. `run-phase03.sh` verifies VM-to-VM static WireGuard peering plus overlay ping.
 
 ## Next
 
-1. Implement `TASK-006` Linux direct tunnel setup over the newly discovered peer set.
-2. Extend the VM lab from Phase 01/02 verification to Phase 03 overlay tunnel checks.
-3. Start the STUN and signaling path once the static Linux tunnel path is stable.
+1. Start the STUN and signaling path now that the static Linux tunnel path is stable.
+2. Add candidate collection and endpoint selection over `SignalService`.
+3. Keep the relay path as a later fallback-only step.
 
 ## Risks
 
 1. `INCREMENTAL` events still carry the latest full peer set rather than true patches.
-2. WireGuard data plane is still a stub until `TASK-006`.
+2. Linux data-plane reconciliation shells out to `ip` and `wg`, so it must run with root privileges in the guest.
 3. VM lab acceptance depends on a local cloud image and SSH key being configured in `tests/nat-lab/libvirt.env`.

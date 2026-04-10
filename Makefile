@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: proto fmt lint server client test smoke smoke-phase02 vm-lab tree
+.PHONY: proto fmt lint server client test smoke smoke-phase02 vm-lab vm-lab-phase03 tree
 
 proto:
 	./scripts/gen-proto.sh
@@ -28,6 +28,9 @@ smoke-phase02:
 
 vm-lab:
 	./tests/nat-lab/run-phase01-02.sh
+
+vm-lab-phase03:
+	./tests/nat-lab/run-phase03.sh
 
 tree:
 	find . -maxdepth 3 | sort

@@ -19,6 +19,10 @@ func TestRegisterDeviceReturnsVisiblePeers(t *testing.T) {
 		Token:     "meshlink-dev-token",
 		Os:        "linux",
 		Version:   "0.1.0",
+		DirectEndpoint: &pb.DirectEndpoint{
+			Host: "192.0.2.10",
+			Port: 51820,
+		},
 	})
 	if err != nil {
 		t.Fatalf("register first device: %v", err)
@@ -42,6 +46,9 @@ func TestRegisterDeviceReturnsVisiblePeers(t *testing.T) {
 	}
 	if second.GetPeers()[0].GetPeerId() != first.GetDevice().GetId() {
 		t.Fatalf("expected peer %s, got %s", first.GetDevice().GetId(), second.GetPeers()[0].GetPeerId())
+	}
+	if second.GetPeers()[0].GetDirectEndpoint().GetHost() != "192.0.2.10" {
+		t.Fatalf("expected visible peer direct endpoint to propagate, got %+v", second.GetPeers()[0].GetDirectEndpoint())
 	}
 }
 
@@ -82,6 +89,10 @@ func TestSyncConfigPublishesPeerDiscoveryUpdates(t *testing.T) {
 		Token:     "meshlink-dev-token",
 		Os:        "linux",
 		Version:   "0.1.0",
+		DirectEndpoint: &pb.DirectEndpoint{
+			Host: "192.0.2.20",
+			Port: 51821,
+		},
 	})
 	if err != nil {
 		t.Fatalf("register second device: %v", err)
@@ -100,6 +111,9 @@ func TestSyncConfigPublishesPeerDiscoveryUpdates(t *testing.T) {
 	if update.GetPeers()[0].GetPeerId() != second.GetDevice().GetId() {
 		t.Fatalf("expected peer %s, got %s", second.GetDevice().GetId(), update.GetPeers()[0].GetPeerId())
 	}
+	if update.GetPeers()[0].GetDirectEndpoint().GetHost() != "192.0.2.20" {
+		t.Fatalf("expected propagated direct endpoint, got %+v", update.GetPeers()[0].GetDirectEndpoint())
+	}
 
 	cancel()
 	select {
@@ -109,6 +123,61 @@ func TestSyncConfigPublishesPeerDiscoveryUpdates(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for sync stream shutdown")
+	}
+}
+
+func TestRegisterDevicePreservesExistingDirectEndpoint(t *testing.T) {
+	service := newTestManagementService(t)
+
+	first, err := service.RegisterDevice(context.Background(), &pb.RegisterDeviceRequest{
+		Name:      "client-a",
+		PublicKey: "pk-a",
+		Token:     "meshlink-dev-token",
+		Os:        "linux",
+		Version:   "0.1.0",
+		DirectEndpoint: &pb.DirectEndpoint{
+			Host: "198.51.100.10",
+			Port: 51820,
+		},
+	})
+	if err != nil {
+		t.Fatalf("register first device: %v", err)
+	}
+
+	second, err := service.RegisterDevice(context.Background(), &pb.RegisterDeviceRequest{
+		Name:      "client-a-renamed",
+		PublicKey: "pk-a",
+		Token:     "meshlink-dev-token",
+		Os:        "linux",
+		Version:   "0.1.1",
+	})
+	if err != nil {
+		t.Fatalf("register second device: %v", err)
+	}
+
+	if first.GetDevice().GetId() != second.GetDevice().GetId() {
+		t.Fatalf("expected stable device id, got %s then %s", first.GetDevice().GetId(), second.GetDevice().GetId())
+	}
+	if second.GetDevice().GetDirectEndpoint().GetHost() != "198.51.100.10" || second.GetDevice().GetDirectEndpoint().GetPort() != 51820 {
+		t.Fatalf("expected direct endpoint to be preserved, got %+v", second.GetDevice().GetDirectEndpoint())
+	}
+}
+
+func TestRegisterDeviceRejectsIncompleteDirectEndpoint(t *testing.T) {
+	service := newTestManagementService(t)
+
+	_, err := service.RegisterDevice(context.Background(), &pb.RegisterDeviceRequest{
+		Name:      "client-a",
+		PublicKey: "pk-a",
+		Token:     "meshlink-dev-token",
+		Os:        "linux",
+		Version:   "0.1.0",
+		DirectEndpoint: &pb.DirectEndpoint{
+			Host: "192.0.2.10",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected validation error for incomplete direct endpoint")
 	}
 }
 

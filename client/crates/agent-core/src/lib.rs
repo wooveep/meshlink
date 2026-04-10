@@ -3,11 +3,14 @@ use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 use anyhow::{anyhow, Context, Result};
 use api_client::proto::management_service_client::ManagementServiceClient;
 use api_client::proto::{
-    Peer, RegisterDeviceRequest, SyncConfigEvent, SyncConfigEventType, SyncConfigRequest,
+    DirectEndpoint, Peer, RegisterDeviceRequest, SyncConfigEvent, SyncConfigEventType,
+    SyncConfigRequest,
 };
+use netlink_linux::LinuxWireGuardBackend;
 use serde::Deserialize;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
+use wg_manager::{build_desired_state, WireGuardBackend};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
@@ -22,6 +25,12 @@ pub struct AgentConfig {
     pub os: String,
     #[serde(default = "default_version")]
     pub version: String,
+    #[serde(default)]
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub listen_port: Option<u16>,
+    #[serde(default)]
+    pub advertise_host: Option<String>,
 }
 
 impl AgentConfig {
@@ -32,9 +41,39 @@ impl AgentConfig {
             toml::from_str(&raw).with_context(|| format!("parse config {}", path.display()))?;
         Ok(config)
     }
+
+    fn registration_direct_endpoint(&self) -> Option<DirectEndpoint> {
+        match (self.advertise_host.as_deref(), self.listen_port) {
+            (Some(host), Some(port)) if !host.trim().is_empty() => Some(DirectEndpoint {
+                host: host.trim().to_string(),
+                port: u32::from(port),
+            }),
+            _ => None,
+        }
+    }
+
+    fn linux_tunnel_settings(&self) -> Option<LinuxTunnelSettings> {
+        match (self.private_key.as_deref(), self.listen_port) {
+            (Some(private_key), Some(listen_port)) if !private_key.trim().is_empty() => {
+                Some(LinuxTunnelSettings {
+                    private_key: private_key.trim().to_string(),
+                    listen_port,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinuxTunnelSettings {
+    private_key: String,
+    listen_port: u16,
 }
 
 pub async fn run(config: AgentConfig) -> Result<()> {
+    log_data_plane_mode(&config);
+
     loop {
         match register_and_sync(&config).await {
             Ok(()) => warn!("sync stream closed, reconnecting"),
@@ -51,6 +90,7 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
         .await
         .context("connect management service")?;
     let mut peer_cache = PeerCache::default();
+    let backend = LinuxWireGuardBackend::new();
 
     let response = client
         .register_device(RegisterDeviceRequest {
@@ -59,6 +99,7 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
             token: config.bootstrap_token.clone(),
             os: config.os.clone(),
             version: config.version.clone(),
+            direct_endpoint: config.registration_direct_endpoint(),
         })
         .await
         .context("register device")?
@@ -124,9 +165,79 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
             peer_removed = update.removed,
             "received config event"
         );
+
+        reconcile_wireguard_state(config, &backend, &event)?;
     }
 
     Ok(())
+}
+
+fn reconcile_wireguard_state(
+    config: &AgentConfig,
+    backend: &impl WireGuardBackend,
+    event: &SyncConfigEvent,
+) -> Result<()> {
+    if config.os != "linux" {
+        return Ok(());
+    }
+
+    let Some(settings) = config.linux_tunnel_settings() else {
+        return Ok(());
+    };
+
+    let self_device = event
+        .self_
+        .as_ref()
+        .ok_or_else(|| anyhow!("config event missing self device"))?;
+    let outcome = build_desired_state(
+        &config.interface_name,
+        &settings.private_key,
+        settings.listen_port,
+        self_device,
+        &event.peers,
+    )
+    .context("build wireguard desired state")?;
+
+    for skipped in &outcome.skipped_peers {
+        warn!(
+            peer_id = %skipped.peer_id,
+            reason = %skipped.reason,
+            "skipping peer during wireguard reconciliation"
+        );
+    }
+
+    backend
+        .reconcile(&outcome.desired_state)
+        .context("reconcile wireguard state")?;
+
+    info!(
+        interface = %outcome.desired_state.interface_name,
+        overlay_ipv4 = %outcome.desired_state.address_cidr,
+        configured_peers = outcome.desired_state.peers.len(),
+        skipped_peers = outcome.skipped_peers.len(),
+        "wireguard state reconciled"
+    );
+
+    Ok(())
+}
+
+fn log_data_plane_mode(config: &AgentConfig) {
+    match (
+        config.private_key.is_some(),
+        config.listen_port.is_some(),
+        config.advertise_host.is_some(),
+    ) {
+        (true, true, true) if config.os == "linux" => info!(
+            interface = %config.interface_name,
+            listen_port = config.listen_port.unwrap_or_default(),
+            "linux wireguard reconciliation enabled"
+        ),
+        (false, false, false) => info!("running in discovery-only mode"),
+        _ => warn!(
+            interface = %config.interface_name,
+            "partial data-plane config detected; running in discovery-only mode"
+        ),
+    }
 }
 
 fn default_log_level() -> String {
@@ -149,6 +260,7 @@ pub struct CachedPeer {
     pub overlay_ipv6: String,
     pub allowed_ips: Vec<String>,
     pub preferred_path: i32,
+    pub direct_endpoint: Option<CachedDirectEndpoint>,
 }
 
 impl CachedPeer {
@@ -161,6 +273,25 @@ impl CachedPeer {
             overlay_ipv6: overlay.map(|value| value.ipv6.clone()).unwrap_or_default(),
             allowed_ips: peer.allowed_ips.clone(),
             preferred_path: peer.preferred_path,
+            direct_endpoint: peer
+                .direct_endpoint
+                .as_ref()
+                .map(CachedDirectEndpoint::from_proto),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedDirectEndpoint {
+    pub host: String,
+    pub port: u32,
+}
+
+impl CachedDirectEndpoint {
+    fn from_proto(endpoint: &DirectEndpoint) -> Self {
+        Self {
+            host: endpoint.host.clone(),
+            port: endpoint.port,
         }
     }
 }
@@ -283,8 +414,53 @@ fn describe_event_type(raw: i32) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{CachedPeer, PeerCache};
+    use super::{AgentConfig, CachedPeer, PeerCache};
     use api_client::proto::{OverlayAddress, PathType, Peer, SyncConfigEvent, SyncConfigEventType};
+
+    #[test]
+    fn agent_config_parses_optional_linux_fields() {
+        let config: AgentConfig = toml::from_str(
+            r#"
+node_name = "client-a"
+management_addr = "127.0.0.1:33073"
+bootstrap_token = "meshlink-dev-token"
+public_key = "meshlink-client-a-public-key"
+interface_name = "sdwan0"
+private_key = "meshlink-client-a-private-key"
+listen_port = 51820
+advertise_host = "192.0.2.10"
+"#,
+        )
+        .expect("parse config");
+
+        let endpoint = config
+            .registration_direct_endpoint()
+            .expect("registration direct endpoint");
+        let settings = config
+            .linux_tunnel_settings()
+            .expect("linux tunnel settings");
+
+        assert_eq!(endpoint.host, "192.0.2.10");
+        assert_eq!(endpoint.port, 51820);
+        assert_eq!(settings.listen_port, 51820);
+    }
+
+    #[test]
+    fn missing_linux_fields_leave_discovery_only_mode() {
+        let config: AgentConfig = toml::from_str(
+            r#"
+node_name = "client-a"
+management_addr = "127.0.0.1:33073"
+bootstrap_token = "meshlink-dev-token"
+public_key = "meshlink-client-a-public-key"
+interface_name = "sdwan0"
+"#,
+        )
+        .expect("parse config");
+
+        assert!(config.registration_direct_endpoint().is_none());
+        assert!(config.linux_tunnel_settings().is_none());
+    }
 
     #[test]
     fn full_event_populates_peer_cache() {
@@ -309,6 +485,7 @@ mod tests {
                 overlay_ipv6: String::new(),
                 allowed_ips: vec!["100.64.0.2/32".to_string()],
                 preferred_path: PathType::PublicIpv4 as i32,
+                direct_endpoint: None,
             }]
         );
     }
@@ -394,6 +571,7 @@ mod tests {
             }),
             allowed_ips: vec![format!("{overlay_ipv4}/32")],
             preferred_path: PathType::PublicIpv4 as i32,
+            ..Default::default()
         }
     }
 }

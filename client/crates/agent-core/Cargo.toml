@@ -7,7 +7,9 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 api-client = { path = "../api-client" }
+netlink-linux = { path = "../netlink-linux" }
 serde.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
+wg-manager = { path = "../wg-manager" }
