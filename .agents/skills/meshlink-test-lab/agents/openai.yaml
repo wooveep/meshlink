@@ -1,0 +1,4 @@
+interface:
+  display_name: "MeshLink Test Lab"
+  short_description: "Run and evolve the MeshLink QEMU/libvirt test lab and acceptance checks"
+  default_prompt: "Work on the MeshLink VM and acceptance lab. Use QEMU/libvirt as the default platform, keep scenarios phase-specific, and leave behind repeatable commands or scripts with clear pass/fail checks."

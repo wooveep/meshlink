@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package meshlink.v1;
+
+option go_package = "meshlink/server/pkg/pb;pb";
+
+import "common.proto";
+
+service ManagementService {
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+  rpc SyncConfig(SyncConfigRequest) returns (stream SyncConfigEvent);
+  rpc GetDevice(GetDeviceRequest) returns (GetDeviceResponse);
+}
+
+message RegisterDeviceRequest {
+  string name = 1;
+  string public_key = 2;
+  string token = 3;
+  string os = 4;
+  string version = 5;
+}
+
+message RegisterDeviceResponse {
+  Device device = 1;
+  repeated Peer peers = 2;
+}
+
+message SyncConfigRequest {
+  string device_id = 1;
+}
+
+message SyncConfigEvent {
+  SyncConfigEventType type = 1;
+  Device self = 2;
+  repeated Peer peers = 3;
+  string revision = 4;
+}
+
+message GetDeviceRequest {
+  string device_id = 1;
+}
+
+message GetDeviceResponse {
+  Device device = 1;
+}
+
+enum SyncConfigEventType {
+  SYNC_CONFIG_EVENT_TYPE_UNSPECIFIED = 0;
+  SYNC_CONFIG_EVENT_TYPE_FULL = 1;
+  SYNC_CONFIG_EVENT_TYPE_INCREMENTAL = 2;
+}

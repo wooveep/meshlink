@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package meshlink.v1;
+
+option go_package = "meshlink/server/pkg/pb;pb";
+
+import "common.proto";
+
+service SignalService {
+  rpc OpenSignal(stream SignalEnvelope) returns (stream SignalEnvelope);
+}
+
+message SignalEnvelope {
+  SignalKind kind = 1;
+  string source_device_id = 2;
+  string target_device_id = 3;
+  repeated Candidate candidates = 4;
+  string payload = 5;
+}

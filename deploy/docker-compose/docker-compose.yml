@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  managementd:
+    build:
+      context: ../../server
+    command: ["managementd", "-listen", ":33073"]
+    ports:
+      - "33073:33073"
+
+  signald:
+    build:
+      context: ../../server
+    command: ["signald", "-listen", ":10000"]
+    ports:
+      - "10000:10000"
+
+  relayd:
+    build:
+      context: ../../server
+    command: ["relayd", "-listen", ":3478"]
+    ports:
+      - "3478:3478/udp"

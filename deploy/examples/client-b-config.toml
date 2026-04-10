@@ -1,0 +1,6 @@
+node_name = "client-b"
+management_addr = "127.0.0.1:33073"
+bootstrap_token = "meshlink-dev-token"
+public_key = "meshlink-client-b-public-key"
+interface_name = "sdwan0"
+log_level = "info"

@@ -1,0 +1,23 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+
+# Build
+bin/
+dist/
+target/
+coverage/
+
+# Go
+server/.cache/
+
+# Rust
+**/Cargo.lock
+
+# Env
+.env
+.env.local

@@ -1,0 +1,130 @@
+version: 1
+updated_at: "2026-04-10T00:15:00+08:00"
+tasks:
+  - id: TASK-000
+    title: Bootstrap Go and Protobuf toolchain
+    phase: phase-00-foundation
+    status: done
+    priority: P0
+    depends_on: []
+    owner: platform
+    doc: docs/tasks/phase-00-foundation.md
+    repo_paths:
+      - scripts/gen-proto.sh
+      - server/go.mod
+    acceptance: Go, protoc, protoc-gen-go, protoc-gen-go-grpc available locally
+    verification: go version && protoc --version
+    updated_at: "2026-04-09T23:00:00+08:00"
+  - id: TASK-001
+    title: Implement ManagementService RegisterDevice and SyncConfig
+    phase: phase-01-bootstrap-connectivity
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-000
+    owner: server
+    doc: docs/tasks/phase-01-bootstrap-connectivity.md
+    repo_paths:
+      - server/cmd/managementd
+      - server/internal/app
+      - server/internal/auth
+      - server/internal/device
+      - server/internal/ipam
+    acceptance: Server listens, validates bootstrap token, allocates overlay IP, and streams config events
+    verification: cd server && go test ./...
+    updated_at: "2026-04-09T23:00:00+08:00"
+  - id: TASK-002
+    title: Implement Rust client registration and sync loop
+    phase: phase-01-bootstrap-connectivity
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-001
+    owner: client
+    doc: docs/tasks/phase-01-bootstrap-connectivity.md
+    repo_paths:
+      - client/bin/meshlinkd
+      - client/crates/agent-core
+      - client/crates/api-client
+      - client/crates/cli
+      - client/crates/telemetry
+    acceptance: Client reads config, registers, opens sync stream, and logs events
+    verification: cargo test --manifest-path client/Cargo.toml --workspace
+    updated_at: "2026-04-09T23:00:00+08:00"
+  - id: TASK-003
+    title: Add project task files and AI progress sources
+    phase: phase-00-foundation
+    status: done
+    priority: P0
+    depends_on: []
+    owner: docs
+    doc: docs/tasks/phase-00-foundation.md
+    repo_paths:
+      - docs/tasks
+      - docs/ai
+    acceptance: Phase docs, YAML index, and human-readable progress summary exist
+    verification: test -f docs/tasks/index.yaml
+    updated_at: "2026-04-09T23:00:00+08:00"
+  - id: TASK-004
+    title: Create dual Skills for development and VM test lab
+    phase: phase-00-foundation
+    status: done
+    priority: P1
+    depends_on:
+      - TASK-003
+    owner: ai
+    doc: docs/tasks/phase-00-foundation.md
+    repo_paths:
+      - skills/meshlink-sdwan-dev
+      - skills/meshlink-test-lab
+    acceptance: Development and test-lab workflows are split into two Skills with references and agent metadata
+    verification: find skills -maxdepth 2 -name SKILL.md | sort
+    updated_at: "2026-04-09T23:00:00+08:00"
+  - id: TASK-005
+    title: Build client discovery over SyncConfig
+    phase: phase-02-client-discovery
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-001
+      - TASK-002
+    owner: server
+    doc: docs/tasks/phase-02-client-discovery.md
+    repo_paths:
+      - server/internal/peer
+      - server/internal/device
+      - client/crates/agent-core
+    acceptance: Two clients observe each other through SyncConfig without creating tunnels
+    verification: ./tests/e2e/phase02-smoke.sh
+    updated_at: "2026-04-10T00:15:00+08:00"
+  - id: TASK-006
+    title: Establish Linux direct tunnel without NAT
+    phase: phase-03-linux-direct-tunnel
+    status: todo
+    priority: P0
+    depends_on:
+      - TASK-005
+    owner: client
+    doc: docs/tasks/phase-03-linux-direct-tunnel.md
+    repo_paths:
+      - client/crates/wg-manager
+      - client/crates/netlink-linux
+    acceptance: Two Linux clients can configure a static endpoint and exchange overlay traffic
+    verification: TBD
+    updated_at: "2026-04-09T23:00:00+08:00"
+  - id: TASK-007
+    title: Build QEMU libvirt lab and smoke scenarios
+    phase: phase-04-vm-lab-and-tests
+    status: done
+    priority: P1
+    depends_on:
+      - TASK-005
+    owner: test
+    doc: docs/tasks/phase-04-vm-lab-and-tests.md
+    repo_paths:
+      - tests/e2e
+      - tests/nat-lab
+      - skills/meshlink-test-lab
+    acceptance: VM topology and repeatable acceptance commands exist for phase 01-02, with Phase 03 extension queued behind TASK-006
+    verification: ./tests/nat-lab/run-phase01-02.sh
+    updated_at: "2026-04-10T00:15:00+08:00"

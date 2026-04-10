@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package meshlink.v1;
+
+option go_package = "meshlink/server/pkg/pb;pb";
+
+message OverlayAddress {
+  string ipv4 = 1;
+  string ipv6 = 2;
+}
+
+message Device {
+  string id = 1;
+  string name = 2;
+  string public_key = 3;
+  string version = 4;
+  string os = 5;
+  OverlayAddress overlay = 6;
+  map<string, string> labels = 7;
+}
+
+message Peer {
+  string peer_id = 1;
+  string public_key = 2;
+  OverlayAddress overlay = 3;
+  repeated string allowed_ips = 4;
+  PathType preferred_path = 5;
+}
+
+message Candidate {
+  CandidateType type = 1;
+  string address = 2;
+  uint32 port = 3;
+  string network_interface = 4;
+  uint32 priority = 5;
+}
+
+enum CandidateType {
+  CANDIDATE_TYPE_UNSPECIFIED = 0;
+  CANDIDATE_TYPE_LAN = 1;
+  CANDIDATE_TYPE_PUBLIC_IPV4 = 2;
+  CANDIDATE_TYPE_PUBLIC_IPV6 = 3;
+  CANDIDATE_TYPE_RELAY = 4;
+}
+
+enum PathType {
+  PATH_TYPE_UNSPECIFIED = 0;
+  PATH_TYPE_LAN = 1;
+  PATH_TYPE_IPV6 = 2;
+  PATH_TYPE_PUBLIC_IPV4 = 3;
+  PATH_TYPE_HOLEPUNCHED_IPV4 = 4;
+  PATH_TYPE_RELAY = 5;
+}
+
+enum SignalKind {
+  SIGNAL_KIND_UNSPECIFIED = 0;
+  SIGNAL_KIND_CANDIDATES = 1;
+  SIGNAL_KIND_PUNCH_REQUEST = 2;
+  SIGNAL_KIND_PUNCH_RESULT = 3;
+  SIGNAL_KIND_HEARTBEAT = 4;
+}

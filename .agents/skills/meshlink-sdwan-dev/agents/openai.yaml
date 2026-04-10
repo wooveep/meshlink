@@ -1,0 +1,4 @@
+interface:
+  display_name: "MeshLink Dev"
+  short_description: "Implement MeshLink server, client, proto, and project task updates"
+  default_prompt: "Work on the MeshLink WireGuard SD-WAN project. Follow the project skill rules, keep control plane and data plane boundaries explicit, update protocol and design docs when contracts change, and keep task files in sync when status or sequencing changes."

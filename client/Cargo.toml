@@ -1,0 +1,32 @@
+[workspace]
+members = [
+  "bin/meshlinkd",
+  "crates/agent-core",
+  "crates/api-client",
+  "crates/stun",
+  "crates/holepunch",
+  "crates/wg-manager",
+  "crates/netlink-linux",
+  "crates/wintun-windows",
+  "crates/relay-client",
+  "crates/telemetry",
+  "crates/cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+prost = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "signal", "time"] }
+toml = "0.8"
+tonic = { version = "0.12", features = ["transport"] }
+tonic-build = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

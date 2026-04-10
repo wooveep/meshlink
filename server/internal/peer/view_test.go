@@ -1,0 +1,27 @@
+package peer
+
+import (
+	"testing"
+
+	"meshlink/server/internal/device"
+)
+
+func TestBuildVisiblePeersExcludesSelfAndSorts(t *testing.T) {
+	records := []*device.Record{
+		{ID: "dev-c", PublicKey: "pk-c", OverlayIP: "100.64.0.3"},
+		{ID: "dev-a", PublicKey: "pk-a", OverlayIP: "100.64.0.1"},
+		{ID: "dev-b", PublicKey: "pk-b", OverlayIP: "100.64.0.2"},
+	}
+
+	peers := BuildVisiblePeers("dev-b", records)
+	if len(peers) != 2 {
+		t.Fatalf("expected 2 visible peers, got %d", len(peers))
+	}
+
+	if peers[0].GetPeerId() != "dev-a" || peers[1].GetPeerId() != "dev-c" {
+		t.Fatalf("expected peers sorted by id, got %s then %s", peers[0].GetPeerId(), peers[1].GetPeerId())
+	}
+	if peers[0].GetAllowedIps()[0] != "100.64.0.1/32" {
+		t.Fatalf("expected allowed ip to include overlay /32, got %v", peers[0].GetAllowedIps())
+	}
+}
