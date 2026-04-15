@@ -1,0 +1,14 @@
+node_name = "replace-me"
+management_addr = "replace-me:33073"
+signal_addr = "replace-me:10000"
+relay_addr = "replace-me:3478"
+stun_addr = "replace-me:3479"
+bootstrap_token = "meshlink-dev-token"
+public_key = "replace-me"
+interface_name = "MeshLink"
+log_level = "info"
+punch_timeout = "3s"
+private_key = "replace-me"
+listen_port = 51820
+# advertise_host = "198.51.100.10"
+# advertised_routes = ["10.20.0.0/24"]

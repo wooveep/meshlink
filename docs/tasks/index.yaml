@@ -1,5 +1,5 @@
 version: 1
-updated_at: "2026-04-10T02:00:00+08:00"
+updated_at: "2026-04-13T19:20:00+08:00"
 tasks:
   - id: TASK-000
     title: Bootstrap Go and Protobuf toolchain
@@ -125,6 +125,257 @@ tasks:
       - tests/e2e
       - tests/nat-lab
       - skills/meshlink-test-lab
-    acceptance: VM topology and repeatable acceptance commands exist for phase 01-02, with Phase 03 extension queued behind TASK-006
-    verification: ./tests/nat-lab/run-phase01-02.sh
-    updated_at: "2026-04-10T00:15:00+08:00"
+    acceptance: VM topology and repeatable acceptance commands exist for phase 01-03, including a deb-install/systemd-based Phase 03 validation path
+    verification: ./tests/nat-lab/run-phase01-02.sh && ./tests/nat-lab/run-phase03.sh && make package-deb && ./tests/nat-lab/run-phase03-deb.sh
+    updated_at: "2026-04-11T10:30:00+08:00"
+  - id: TASK-008
+    title: Produce Debian build artifacts for current deliverables
+    phase: phase-00-foundation
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-001
+      - TASK-002
+      - TASK-006
+    owner: platform
+    doc: docs/tasks/phase-00-foundation.md
+    repo_paths:
+      - Makefile
+      - scripts/build-server.sh
+      - scripts/build-client.sh
+      - scripts/package-deb.sh
+      - deploy/packages
+      - deploy/systemd
+    acceptance: Debian amd64 packages are produced for the current server/client deliverables with standard install paths and config assets
+    verification: make package-deb && dpkg-deb -I dist/deb/*.deb
+    updated_at: "2026-04-10T22:30:00+08:00"
+  - id: TASK-009
+    title: Linux NAT traversal via STUN and SignalService
+    phase: phase-05-nat-punching
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-006
+      - TASK-007
+    owner: client
+    doc: docs/tasks/phase-05-nat-punching.md
+    repo_paths:
+      - proto/signal.proto
+      - server/internal/signal
+      - client/crates/stun
+      - client/crates/holepunch
+      - client/crates/agent-core
+      - tests/nat-lab
+    acceptance: Two Linux clients can exchange candidates over SignalService, override peer endpoints at runtime, and establish a dynamic direct path without recreating the WireGuard interface on the dual-NAT lab
+    verification: cd server && go test ./... && cargo test --manifest-path client/Cargo.toml --workspace && MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/nat-lab/run-phase05.sh
+    updated_at: "2026-04-11T21:30:00+08:00"
+  - id: TASK-010
+    title: Relay fallback and direct-path recovery on dual-NAT
+    phase: phase-06-relay-fallback
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-009
+    owner: client
+    doc: docs/tasks/phase-06-relay-fallback.md
+    repo_paths:
+      - proto/relay.proto
+      - server/internal/relay
+      - client/crates/relay-client
+      - client/crates/agent-core
+      - tests/nat-lab
+    acceptance: Two Linux clients on the dual-NAT lab can fall back to relay under forced peer-to-peer WireGuard UDP loss and recover back to a direct NAT-WAN path after the fault is removed
+    verification: bash -n tests/nat-lab/common.sh tests/nat-lab/create-lab.sh tests/nat-lab/destroy-lab.sh tests/nat-lab/run-phase05.sh tests/nat-lab/run-phase06.sh && cd server && go test ./... && cargo test --manifest-path client/Cargo.toml --workspace && MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/nat-lab/run-phase06.sh
+    updated_at: "2026-04-11T21:30:00+08:00"
+  - id: TASK-011
+    title: Create ordered remaining-work doc and refresh roadmap status
+    phase: phase-00-foundation
+    status: done
+    priority: P1
+    depends_on:
+      - TASK-010
+    owner: docs
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - docs/tasks/remaining-work.md
+      - docs/tasks/index.yaml
+      - docs/tasks/progress.md
+      - docs/roadmap/execution-plan.md
+      - docs/tasks/phase-07-windows-client.md
+      - README.md
+    acceptance: Remaining work is captured in one ordered execution file and stale roadmap/status docs no longer describe phase 05/06 as pending
+    verification: test -f docs/tasks/remaining-work.md && rg -n "TASK-011|phase08|Windows" docs/tasks docs/roadmap README.md
+    updated_at: "2026-04-11T23:40:00+08:00"
+  - id: TASK-012
+    title: Add managementd hook chain and route advertisement metadata
+    phase: phase-06-relay-fallback
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-010
+    owner: server
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - proto/common.proto
+      - proto/management.proto
+      - server/internal/app
+      - server/internal/device
+      - server/internal/peer
+    acceptance: ManagementService stores static advertised routes, rejects invalid or overlapping IPv4 prefixes, and derives Peer.allowed_ips through a hook chain
+    verification: cd server && go test ./...
+    updated_at: "2026-04-11T23:40:00+08:00"
+  - id: TASK-013
+    title: Add client static route publication
+    phase: phase-06-relay-fallback
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-012
+    owner: client
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - client/crates/agent-core
+      - client/crates/wg-manager
+      - deploy/examples
+    acceptance: Client config accepts static advertised routes, every registration republishes the full route set, and Linux reconciliation preserves extra allowed IPs
+    verification: cargo test --manifest-path client/Cargo.toml --workspace
+    updated_at: "2026-04-11T23:40:00+08:00"
+  - id: TASK-014
+    title: Add route advertisement acceptance and withdrawal regression
+    phase: phase-04-vm-lab-and-tests
+    status: done
+    priority: P1
+    depends_on:
+      - TASK-013
+    owner: test
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - tests/nat-lab/run-phase08-routes.sh
+      - tests/nat-lab/common.sh
+      - Makefile
+    acceptance: A dual-NAT lab script verifies route advertisement, relay fallback continuity, direct-path recovery, and route withdrawal cleanup
+    verification: bash -n tests/nat-lab/common.sh tests/nat-lab/run-phase05.sh tests/nat-lab/run-phase06.sh tests/nat-lab/run-phase08-routes.sh
+    updated_at: "2026-04-11T23:40:00+08:00"
+  - id: TASK-015
+    title: Preserve the external-WireGuard Windows minimum path as a transition milestone
+    phase: phase-07-windows-client
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-013
+    owner: client
+    doc: docs/tasks/phase-07-windows-client.md
+    repo_paths:
+      - client/crates/agent-core
+      - client/crates/wintun-windows
+      - docs/tasks/phase-07-windows-client.md
+    acceptance: Windows reuses the same protocol and AllowedIPs model, with a first external-WireGuard transition backend and a documented embedded-runtime follow-up
+    verification: cargo test --manifest-path client/Cargo.toml --workspace
+    updated_at: "2026-04-13T19:20:00+08:00"
+  - id: TASK-016
+    title: Add Windows VM validation path and zip packaging
+    phase: phase-07-windows-client
+    status: done
+    priority: P1
+    depends_on:
+      - TASK-007
+      - TASK-008
+    owner: platform
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - Makefile
+      - scripts/package-windows.sh
+      - deploy/packages/windows
+      - tests/windows-vm
+      - README.md
+      - docs/tasks/phase-07-windows-client.md
+      - docs/tasks/progress.md
+    acceptance: Windows package artifacts can be staged as a zip payload and attached to a libvirt Windows VM, with a documented dual-NAT validation path against the existing Linux lab
+    verification: bash -n scripts/package-windows.sh tests/windows-vm/create-vm.sh tests/windows-vm/prepare-dual-nat.sh
+    updated_at: "2026-04-12T11:30:00+08:00"
+  - id: TASK-017
+    title: Reframe planning and task files around the embedded runtime phase
+    phase: phase-08-embedded-wireguard-runtime
+    status: done
+    priority: P1
+    depends_on:
+      - TASK-016
+    owner: docs
+    doc: docs/tasks/phase-08-embedded-wireguard-runtime.md
+    repo_paths:
+      - docs/tasks/phase-08-embedded-wireguard-runtime.md
+      - docs/tasks/index.yaml
+      - docs/tasks/remaining-work.md
+      - docs/tasks/progress.md
+      - docs/roadmap/execution-plan.md
+      - README.md
+    acceptance: Embedded runtime work has its own phase file and the roadmap no longer treats the external Windows runtime path as the final architecture
+    verification: rg -n "TASK-017|embedded runtime|Phase 08" docs/tasks docs/roadmap README.md
+    updated_at: "2026-04-13T19:20:00+08:00"
+  - id: TASK-018
+    title: Replace Linux wg shell-outs with the embedded WireGuard UAPI library
+    phase: phase-08-embedded-wireguard-runtime
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-017
+    owner: client
+    doc: docs/tasks/phase-08-embedded-wireguard-runtime.md
+    repo_paths:
+      - client/crates/netlink-linux
+      - client/crates/agent-core/src/signal.rs
+      - deploy/packages/nfpm/meshlink-client.yaml
+    acceptance: Linux uses the vendored official embeddable UAPI library for configuration and handshake inspection, and the Debian package no longer requires wireguard-tools
+    verification: cargo test --manifest-path client/Cargo.toml --workspace
+    updated_at: "2026-04-13T19:20:00+08:00"
+  - id: TASK-019
+    title: Add the embedded Windows tunnel-service runtime path
+    phase: phase-08-embedded-wireguard-runtime
+    status: in_progress
+    priority: P0
+    depends_on:
+      - TASK-017
+    owner: client
+    doc: docs/tasks/phase-08-embedded-wireguard-runtime.md
+    repo_paths:
+      - client/bin/meshlinkd
+      - client/crates/cli
+      - client/crates/wintun-windows
+    acceptance: meshlinkd.exe supports /service mode and the Windows backend manages an embedded WireGuard tunnel service backed by package-local runtime assets
+    verification: cargo test --manifest-path client/Cargo.toml --workspace
+    updated_at: "2026-04-13T19:20:00+08:00"
+  - id: TASK-020
+    title: Pin and stage Windows runtime assets in the packaging flow
+    phase: phase-08-embedded-wireguard-runtime
+    status: in_progress
+    priority: P1
+    depends_on:
+      - TASK-019
+    owner: platform
+    doc: docs/tasks/phase-08-embedded-wireguard-runtime.md
+    repo_paths:
+      - scripts/package-windows.sh
+      - scripts/build-wireguard-windows-runtime.ps1
+      - deploy/packages/windows
+      - README.md
+    acceptance: package-windows consumes pinned tunnel.dll and wireguard.dll inputs and the repository documents how to stage a source-built tunnel.dll
+    verification: bash -n scripts/package-windows.sh
+    updated_at: "2026-04-13T19:20:00+08:00"
+  - id: TASK-021
+    title: Validate Linux and Windows embedded-runtime regression paths
+    phase: phase-08-embedded-wireguard-runtime
+    status: pending
+    priority: P1
+    depends_on:
+      - TASK-018
+      - TASK-019
+      - TASK-020
+    owner: test
+    doc: docs/tasks/phase-08-embedded-wireguard-runtime.md
+    repo_paths:
+      - tests/nat-lab
+      - tests/windows-vm
+      - docs/tasks/progress.md
+    acceptance: Linux and Windows complete direct, relay, route advertisement, and route withdrawal validation through the embedded-runtime path
+    verification: MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/nat-lab/run-phase08-routes.sh
+    updated_at: "2026-04-13T19:20:00+08:00"

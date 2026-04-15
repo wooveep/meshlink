@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use anyhow::{anyhow, Result};
 use api_client::proto::{Device, Peer};
@@ -31,6 +31,7 @@ pub struct DesiredPeer {
     pub public_key: String,
     pub endpoint: Endpoint,
     pub allowed_ips: Vec<String>,
+    pub persistent_keepalive_seconds: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +82,24 @@ pub fn build_desired_state(
     self_device: &Device,
     peers: &[Peer],
 ) -> Result<BuildOutcome> {
+    build_desired_state_with_overrides(
+        interface_name,
+        private_key,
+        listen_port,
+        self_device,
+        peers,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn build_desired_state_with_overrides(
+    interface_name: &str,
+    private_key: &str,
+    listen_port: u16,
+    self_device: &Device,
+    peers: &[Peer],
+    endpoint_overrides: &BTreeMap<String, Endpoint>,
+) -> Result<BuildOutcome> {
     let overlay_ipv4 = self_device
         .overlay
         .as_ref()
@@ -93,18 +112,22 @@ pub fn build_desired_state(
 
     for peer in peers {
         let peer_id = peer.peer_id.clone();
-        let Some(endpoint) = peer.direct_endpoint.as_ref() else {
-            skipped_peers.push(SkippedPeer {
-                peer_id,
-                reason: SkipReason::MissingDirectEndpoint,
-            });
-            continue;
-        };
+        let endpoint = if let Some(override_endpoint) = endpoint_overrides.get(&peer_id) {
+            override_endpoint.clone()
+        } else {
+            let Some(endpoint) = peer.direct_endpoint.as_ref() else {
+                skipped_peers.push(SkippedPeer {
+                    peer_id,
+                    reason: SkipReason::MissingDirectEndpoint,
+                });
+                continue;
+            };
 
-        let endpoint = Endpoint {
-            host: endpoint.host.clone(),
-            port: u16::try_from(endpoint.port)
-                .map_err(|_| anyhow!("peer {} endpoint port out of range", peer.peer_id))?,
+            Endpoint {
+                host: endpoint.host.clone(),
+                port: u16::try_from(endpoint.port)
+                    .map_err(|_| anyhow!("peer {} endpoint port out of range", peer.peer_id))?,
+            }
         };
 
         let allowed_ips = if peer.allowed_ips.is_empty() {
@@ -123,6 +146,7 @@ pub fn build_desired_state(
             public_key: peer.public_key.clone(),
             endpoint,
             allowed_ips,
+            persistent_keepalive_seconds: Some(15),
         });
     }
 
@@ -142,8 +166,9 @@ pub fn build_desired_state(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_desired_state, Endpoint, SkipReason};
+    use super::{build_desired_state, build_desired_state_with_overrides, Endpoint, SkipReason};
     use api_client::proto::{Device, DirectEndpoint, OverlayAddress, Peer};
+    use std::collections::BTreeMap;
 
     #[test]
     fn build_desired_state_uses_overlay_and_endpoint() {
@@ -185,6 +210,10 @@ mod tests {
                 port: 51821,
             }
         );
+        assert_eq!(
+            outcome.desired_state.peers[0].persistent_keepalive_seconds,
+            Some(15)
+        );
         assert!(outcome.skipped_peers.is_empty());
     }
 
@@ -221,6 +250,39 @@ mod tests {
     }
 
     #[test]
+    fn build_desired_state_preserves_extra_allowed_ips() {
+        let outcome = build_desired_state(
+            "sdwan0",
+            "private-key",
+            51820,
+            &Device {
+                id: "dev-a".to_string(),
+                overlay: Some(OverlayAddress {
+                    ipv4: "100.64.0.1".to_string(),
+                    ipv6: String::new(),
+                }),
+                ..Default::default()
+            },
+            &[Peer {
+                peer_id: "dev-b".to_string(),
+                public_key: "pk-b".to_string(),
+                allowed_ips: vec!["100.64.0.2/32".to_string(), "10.20.0.0/24".to_string()],
+                direct_endpoint: Some(DirectEndpoint {
+                    host: "192.0.2.20".to_string(),
+                    port: 51821,
+                }),
+                ..Default::default()
+            }],
+        )
+        .expect("build desired state");
+
+        assert_eq!(
+            outcome.desired_state.peers[0].allowed_ips,
+            vec!["100.64.0.2/32".to_string(), "10.20.0.0/24".to_string()]
+        );
+    }
+
+    #[test]
     fn endpoint_render_brackets_ipv6() {
         let endpoint = Endpoint {
             host: "2001:db8::10".to_string(),
@@ -228,5 +290,51 @@ mod tests {
         };
 
         assert_eq!(endpoint.render(), "[2001:db8::10]:51820");
+    }
+
+    #[test]
+    fn build_desired_state_prefers_runtime_endpoint_override() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "dev-b".to_string(),
+            Endpoint {
+                host: "203.0.113.20".to_string(),
+                port: 60000,
+            },
+        );
+
+        let outcome = build_desired_state_with_overrides(
+            "sdwan0",
+            "private-key",
+            51820,
+            &Device {
+                id: "dev-a".to_string(),
+                overlay: Some(OverlayAddress {
+                    ipv4: "100.64.0.1".to_string(),
+                    ipv6: String::new(),
+                }),
+                ..Default::default()
+            },
+            &[Peer {
+                peer_id: "dev-b".to_string(),
+                public_key: "pk-b".to_string(),
+                allowed_ips: vec!["100.64.0.2/32".to_string()],
+                direct_endpoint: Some(DirectEndpoint {
+                    host: "192.0.2.20".to_string(),
+                    port: 51821,
+                }),
+                ..Default::default()
+            }],
+            &overrides,
+        )
+        .expect("build desired state with override");
+
+        assert_eq!(
+            outcome.desired_state.peers[0].endpoint,
+            Endpoint {
+                host: "203.0.113.20".to_string(),
+                port: 60000,
+            }
+        );
     }
 }

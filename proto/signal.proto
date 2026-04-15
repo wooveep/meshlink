@@ -10,10 +10,40 @@ service SignalService {
   rpc OpenSignal(stream SignalEnvelope) returns (stream SignalEnvelope);
 }
 
+message SignalHello {
+  string device_id = 1;
+  string public_key = 2;
+  string bootstrap_token = 3;
+}
+
+message CandidateAnnouncement {
+  repeated Candidate candidates = 1;
+}
+
+message PunchRequest {
+  repeated Candidate candidates = 1;
+}
+
+message PunchResult {
+  bool success = 1;
+  Candidate selected_candidate = 2;
+  PathType path_type = 3;
+  string reason = 4;
+}
+
+message Heartbeat {}
+
 message SignalEnvelope {
   SignalKind kind = 1;
   string source_device_id = 2;
   string target_device_id = 3;
-  repeated Candidate candidates = 4;
-  string payload = 5;
+  string session_id = 4;
+
+  oneof body {
+    SignalHello hello = 10;
+    CandidateAnnouncement candidate_announcement = 11;
+    PunchRequest punch_request = 12;
+    PunchResult punch_result = 13;
+    Heartbeat heartbeat = 14;
+  }
 }

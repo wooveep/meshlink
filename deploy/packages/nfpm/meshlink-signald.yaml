@@ -1,0 +1,26 @@
+name: meshlink-signald
+arch: amd64
+platform: linux
+version: ${MESHLINK_PACKAGE_VERSION}
+release: ${MESHLINK_PACKAGE_RELEASE}
+section: net
+priority: optional
+maintainer: MeshLink Maintainers
+vendor: MeshLink
+license: MIT
+description: |
+  MeshLink signal service scaffold package for future NAT traversal work.
+contents:
+  - src: ./dist/bin/linux-amd64/server/signald
+    dst: /usr/bin/signald
+    file_info:
+      mode: 0755
+  - src: ./deploy/packages/env/meshlink-signald.env
+    dst: /etc/default/meshlink-signald.env
+    type: config|noreplace
+    file_info:
+      mode: 0644
+  - src: ./deploy/packages/examples/signald.env.example
+    dst: /usr/share/doc/meshlink-signald/examples/signald.env.example
+    file_info:
+      mode: 0644

@@ -35,3 +35,14 @@ Deliverables:
 1. `meshlink-sdwan-dev`
 2. `meshlink-test-lab`
 3. Agent metadata and references for both
+
+### TASK-008 Produce Debian build artifacts for current deliverables
+
+Status: `done`
+
+Deliverables:
+
+1. `make build-server`, `make build-client`, and `make package-deb`
+2. `dist/bin/linux-amd64/` and `dist/deb/` artifact layout
+3. `nfpm` package definitions for `meshlink-managementd`, `meshlink-signald`, `meshlink-relayd`, and `meshlink-client`
+4. Packaged systemd assets and default config files for current Linux delivery targets

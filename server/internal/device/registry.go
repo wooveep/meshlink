@@ -9,22 +9,24 @@ import (
 )
 
 type Registration struct {
-	Name           string
-	PublicKey      string
-	OS             string
-	Version        string
-	OverlayIP      string
-	DirectEndpoint *DirectEndpoint
+	Name             string
+	PublicKey        string
+	OS               string
+	Version          string
+	OverlayIP        string
+	DirectEndpoint   *DirectEndpoint
+	AdvertisedRoutes []string
 }
 
 type Record struct {
-	ID             string
-	Name           string
-	PublicKey      string
-	OS             string
-	Version        string
-	OverlayIP      string
-	DirectEndpoint *DirectEndpoint
+	ID               string
+	Name             string
+	PublicKey        string
+	OS               string
+	Version          string
+	OverlayIP        string
+	DirectEndpoint   *DirectEndpoint
+	AdvertisedRoutes []string
 }
 
 type DirectEndpoint struct {
@@ -56,6 +58,7 @@ func (r *Registry) Register(input Registration) *Record {
 		existing.OS = input.OS
 		existing.Version = input.Version
 		existing.OverlayIP = input.OverlayIP
+		existing.AdvertisedRoutes = cloneStringSlice(input.AdvertisedRoutes)
 		if input.DirectEndpoint != nil {
 			existing.DirectEndpoint = cloneDirectEndpoint(input.DirectEndpoint)
 		}
@@ -69,13 +72,14 @@ func (r *Registry) Register(input Registration) *Record {
 	}
 
 	record := &Record{
-		ID:             makeID(input.PublicKey),
-		Name:           input.Name,
-		PublicKey:      input.PublicKey,
-		OS:             input.OS,
-		Version:        input.Version,
-		OverlayIP:      input.OverlayIP,
-		DirectEndpoint: cloneDirectEndpoint(input.DirectEndpoint),
+		ID:               makeID(input.PublicKey),
+		Name:             input.Name,
+		PublicKey:        input.PublicKey,
+		OS:               input.OS,
+		Version:          input.Version,
+		OverlayIP:        input.OverlayIP,
+		DirectEndpoint:   cloneDirectEndpoint(input.DirectEndpoint),
+		AdvertisedRoutes: cloneStringSlice(input.AdvertisedRoutes),
 	}
 	r.byKey[input.PublicKey] = record
 	r.byID[record.ID] = record
@@ -138,6 +142,7 @@ func (r *Registry) Subscribe() (<-chan string, func()) {
 func clone(record *Record) *Record {
 	copy := *record
 	copy.DirectEndpoint = cloneDirectEndpoint(record.DirectEndpoint)
+	copy.AdvertisedRoutes = cloneStringSlice(record.AdvertisedRoutes)
 	return &copy
 }
 
@@ -155,6 +160,16 @@ func cloneSubscribers(subscribers map[chan string]struct{}) []chan string {
 	for subscriber := range subscribers {
 		cloned = append(cloned, subscriber)
 	}
+	return cloned
+}
+
+func cloneStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	cloned := make([]string, len(values))
+	copy(cloned, values)
 	return cloned
 }
 

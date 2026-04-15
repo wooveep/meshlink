@@ -22,10 +22,12 @@ Deliverables:
 2. `destroy-lab.sh` tears down the topology and overlay disks.
 3. `run-phase01-02.sh` copies host-built binaries into the VMs and verifies registration plus peer discovery.
 4. `run-phase03.sh` validates static Linux WireGuard peering and overlay ping.
-5. `tests/nat-lab/README.md` documents prerequisites, environment variables, and repeat steps.
+5. `run-phase03-deb.sh` validates deb installation, systemd startup, and Phase 03 overlay connectivity in the VMs.
+6. `tests/nat-lab/README.md` documents prerequisites, environment variables, and repeat steps.
 
 Verification:
 
-1. `bash -n tests/nat-lab/common.sh tests/nat-lab/create-lab.sh tests/nat-lab/destroy-lab.sh tests/nat-lab/run-phase01-02.sh tests/nat-lab/run-phase03.sh`
+1. `bash -n tests/nat-lab/common.sh tests/nat-lab/create-lab.sh tests/nat-lab/destroy-lab.sh tests/nat-lab/run-phase01-02.sh tests/nat-lab/run-phase03.sh tests/nat-lab/run-phase03-deb.sh`
 2. `./tests/nat-lab/run-phase01-02.sh` after configuring `tests/nat-lab/libvirt.env`
 3. `./tests/nat-lab/run-phase03.sh` after configuring `tests/nat-lab/libvirt.env`
+4. `make package-deb && ./tests/nat-lab/run-phase03-deb.sh` after configuring `tests/nat-lab/libvirt.env`

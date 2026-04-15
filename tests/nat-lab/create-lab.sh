@@ -26,27 +26,52 @@ fi
 
 mkdir -p "$MESHLINK_LAB_STATE_DIR"
 
+if [[ "$MESHLINK_LAB_TOPOLOGY" == "dual-nat" ]]; then
+  ensure_isolated_network "$MESHLINK_NAT_A_NETWORK_NAME" "$MESHLINK_NAT_A_BRIDGE_NAME" "$MESHLINK_NAT_A_LAN_HOST_IP" "$MESHLINK_NAT_A_LAN_CIDR"
+  ensure_isolated_network "$MESHLINK_NAT_B_NETWORK_NAME" "$MESHLINK_NAT_B_BRIDGE_NAME" "$MESHLINK_NAT_B_LAN_HOST_IP" "$MESHLINK_NAT_B_LAN_CIDR"
+fi
+
 create_vm() {
   local node="$1"
   local name
-  name="$(vm_name "$node")"
-  local disk_path="$POOL_PATH/${name}.qcow2"
-  local ssh_key_file
-  ssh_key_file="${MESHLINK_SSH_PUBLIC_KEY_FILE:-}"
+  local disk_path
+  local -a network_args
 
-  if [[ -z "$ssh_key_file" ]]; then
-    echo "MESHLINK_SSH_PUBLIC_KEY_FILE is required for cloud-init SSH access" >&2
-    exit 1
-  fi
-  if [[ ! -f "$ssh_key_file" ]]; then
-    echo "SSH public key file not found: $ssh_key_file" >&2
-    exit 1
-  fi
+  name="$(vm_name "$node")"
+  disk_path="$POOL_PATH/${name}.qcow2"
+  network_args=()
 
   if virsh dominfo "$name" >/dev/null 2>&1; then
     echo "vm already exists: $name"
     return
   fi
+
+  case "$MESHLINK_LAB_TOPOLOGY:$node" in
+    flat:mgmt-1|flat:client-a|flat:client-b)
+      network_args+=(--network "network=${MESHLINK_UPSTREAM_NETWORK},model=virtio,mac=$(vm_mac "$node")")
+      ;;
+    dual-nat:mgmt-1)
+      network_args+=(--network "network=${MESHLINK_UPSTREAM_NETWORK},model=virtio,mac=$(vm_mac "$node")")
+      ;;
+    dual-nat:nat-a)
+      network_args+=(--network "network=${MESHLINK_UPSTREAM_NETWORK},model=virtio,mac=$(vm_mac "$node" primary)")
+      network_args+=(--network "network=${MESHLINK_NAT_A_NETWORK_NAME},model=virtio,mac=$(vm_mac "$node" secondary)")
+      ;;
+    dual-nat:nat-b)
+      network_args+=(--network "network=${MESHLINK_UPSTREAM_NETWORK},model=virtio,mac=$(vm_mac "$node" primary)")
+      network_args+=(--network "network=${MESHLINK_NAT_B_NETWORK_NAME},model=virtio,mac=$(vm_mac "$node" secondary)")
+      ;;
+    dual-nat:client-a)
+      network_args+=(--network "network=${MESHLINK_NAT_A_NETWORK_NAME},model=virtio,mac=$(vm_mac "$node")")
+      ;;
+    dual-nat:client-b)
+      network_args+=(--network "network=${MESHLINK_NAT_B_NETWORK_NAME},model=virtio,mac=$(vm_mac "$node")")
+      ;;
+    *)
+      echo "unsupported create target ${MESHLINK_LAB_TOPOLOGY}:${node}" >&2
+      exit 1
+      ;;
+  esac
 
   write_cloud_init_files "$node"
   build_seed_iso "$node"
@@ -60,15 +85,15 @@ create_vm() {
     --os-variant "$MESHLINK_OS_VARIANT" \
     --disk "path=$disk_path,format=qcow2,bus=virtio" \
     --disk "path=$MESHLINK_LAB_STATE_DIR/$node/seed.iso,device=cdrom" \
-    --network "network=$MESHLINK_LIBVIRT_NETWORK,model=virtio" \
+    "${network_args[@]}" \
     --graphics none \
     --noautoconsole
 
   echo "created $name at $(vm_ip "$node")"
 }
 
-create_vm mgmt-1
-create_vm client-a
-create_vm client-b
+while IFS= read -r node; do
+  create_vm "$node"
+done < <(lab_nodes)
 
-echo "meshlink nat lab created"
+echo "meshlink nat lab created (${MESHLINK_LAB_TOPOLOGY})"

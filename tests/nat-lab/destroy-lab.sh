@@ -13,6 +13,7 @@ POOL_PATH="$(pool_path)"
 destroy_vm() {
   local node="$1"
   local name
+
   name="$(vm_name "$node")"
 
   if virsh dominfo "$name" >/dev/null 2>&1; then
@@ -25,9 +26,19 @@ destroy_vm() {
   fi
 }
 
-destroy_vm mgmt-1
-destroy_vm client-a
-destroy_vm client-b
+while IFS= read -r node; do
+  destroy_vm "$node"
+done <<'EOF'
+mgmt-1
+nat-a
+nat-b
+client-a
+client-b
+EOF
+
+clear_phase06_drop_rules || true
+destroy_isolated_network "$MESHLINK_NAT_A_NETWORK_NAME"
+destroy_isolated_network "$MESHLINK_NAT_B_NETWORK_NAME"
 
 rm -rf "$MESHLINK_LAB_STATE_DIR"
 

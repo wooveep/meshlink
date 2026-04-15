@@ -7,9 +7,15 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 api-client = { path = "../api-client" }
+holepunch = { path = "../holepunch" }
 netlink-linux = { path = "../netlink-linux" }
+relay-client = { path = "../relay-client" }
 serde.workspace = true
+stun = { path = "../stun" }
 tokio.workspace = true
+tokio-stream.workspace = true
 toml.workspace = true
+tonic.workspace = true
 tracing.workspace = true
 wg-manager = { path = "../wg-manager" }
+wintun-windows = { path = "../wintun-windows" }

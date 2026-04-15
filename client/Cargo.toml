@@ -24,7 +24,8 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 prost = "0.13"
 serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.42", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = "0.1"
 toml = "0.8"
 tonic = { version = "0.12", features = ["transport"] }
 tonic-build = "0.12"

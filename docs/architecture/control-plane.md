@@ -11,6 +11,7 @@
 3. Peer 列表和 AllowedIPs 生成。
 4. 配置版本与增量更新。
 5. 信令长连接维护。
+6. 静态路由发布校验与分发。
 
 ## 管理服务边界
 
@@ -20,15 +21,24 @@
 2. 拉取完整配置
 3. 订阅配置变更
 4. 查询设备元数据
+5. 通过内置 Hook 链生成最终的 `Peer.allowed_ips`
+
+当前内置 Hook：
+
+1. `static_route_advertiser`
+   负责把 peer overlay `/32` 与 peer 发布的静态 IPv4 CIDR 合并成最终 `AllowedIPs`。
+2. 当前阶段不做 ACL 过滤，策略收敛留给后续 `policy` 模块。
 
 ## 信令服务边界
 
 `signald` 需要提供以下能力：
 
 1. 设备在线会话标识
-2. 候选地址转发
-3. 打洞请求与结果回传
-4. 心跳超时与会话清理
+2. 首帧 `SignalHello` 鉴权与设备身份校验
+3. 候选地址转发
+4. 打洞请求与结果回传
+5. 心跳超时与会话清理
+6. 最小 STUN binding request/response
 
 ## 首版存储建议
 

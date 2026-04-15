@@ -31,3 +31,7 @@ Relay fallback and direct-path recovery.
 ## Phase 07
 
 Windows support.
+
+## Phase 08
+
+Embedded WireGuard runtime and packaging transition.

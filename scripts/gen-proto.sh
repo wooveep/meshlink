@@ -17,6 +17,7 @@ protoc \
   --go-grpc_opt=paths=source_relative \
   "$PROTO_DIR/common.proto" \
   "$PROTO_DIR/management.proto" \
+  "$PROTO_DIR/relay.proto" \
   "$PROTO_DIR/signal.proto"
 
 echo "Generated Go protobuf stubs into $OUT_DIR"

@@ -84,6 +84,28 @@ func TestRegistrySubscribeNotifiesOnChanges(t *testing.T) {
 	}
 }
 
+func TestRegistryReplacesAdvertisedRoutesOnReregister(t *testing.T) {
+	registry := NewRegistry()
+
+	registry.Register(Registration{
+		Name:             "node-a",
+		PublicKey:        "pk-a",
+		OverlayIP:        "100.64.0.1",
+		AdvertisedRoutes: []string{"10.20.0.0/24"},
+	})
+
+	record := registry.Register(Registration{
+		Name:             "node-a",
+		PublicKey:        "pk-a",
+		OverlayIP:        "100.64.0.1",
+		AdvertisedRoutes: []string{},
+	})
+
+	if len(record.AdvertisedRoutes) != 0 {
+		t.Fatalf("expected advertised routes to be replaced with empty list, got %v", record.AdvertisedRoutes)
+	}
+}
+
 func TestRegistryListReturnsSortedCopies(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(Registration{Name: "node-b", PublicKey: "pk-b", OverlayIP: "100.64.0.2"})

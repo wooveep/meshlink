@@ -23,6 +23,7 @@ func TestRegisterDeviceReturnsVisiblePeers(t *testing.T) {
 			Host: "192.0.2.10",
 			Port: 51820,
 		},
+		AdvertisedRoutes: []string{"10.20.0.0/24"},
 	})
 	if err != nil {
 		t.Fatalf("register first device: %v", err)
@@ -49,6 +50,9 @@ func TestRegisterDeviceReturnsVisiblePeers(t *testing.T) {
 	}
 	if second.GetPeers()[0].GetDirectEndpoint().GetHost() != "192.0.2.10" {
 		t.Fatalf("expected visible peer direct endpoint to propagate, got %+v", second.GetPeers()[0].GetDirectEndpoint())
+	}
+	if len(second.GetPeers()[0].GetAllowedIps()) != 2 || second.GetPeers()[0].GetAllowedIps()[1] != "10.20.0.0/24" {
+		t.Fatalf("expected advertised route in allowed ips, got %v", second.GetPeers()[0].GetAllowedIps())
 	}
 }
 
@@ -178,6 +182,69 @@ func TestRegisterDeviceRejectsIncompleteDirectEndpoint(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected validation error for incomplete direct endpoint")
+	}
+}
+
+func TestRegisterDeviceRejectsOverlappingAdvertisedRoutes(t *testing.T) {
+	service := newTestManagementService(t)
+
+	_, err := service.RegisterDevice(context.Background(), &pb.RegisterDeviceRequest{
+		Name:             "client-a",
+		PublicKey:        "pk-a",
+		Token:            "meshlink-dev-token",
+		Os:               "linux",
+		Version:          "0.1.0",
+		AdvertisedRoutes: []string{"10.20.0.0/24"},
+	})
+	if err != nil {
+		t.Fatalf("register first device: %v", err)
+	}
+
+	_, err = service.RegisterDevice(context.Background(), &pb.RegisterDeviceRequest{
+		Name:             "client-b",
+		PublicKey:        "pk-b",
+		Token:            "meshlink-dev-token",
+		Os:               "linux",
+		Version:          "0.1.0",
+		AdvertisedRoutes: []string{"10.20.0.128/25"},
+	})
+	if err == nil {
+		t.Fatal("expected overlapping advertised route to be rejected")
+	}
+}
+
+func TestRegisterDeviceClearsAdvertisedRoutesWhenEmptyListProvided(t *testing.T) {
+	service := newTestManagementService(t)
+
+	first, err := service.RegisterDevice(context.Background(), &pb.RegisterDeviceRequest{
+		Name:             "client-a",
+		PublicKey:        "pk-a",
+		Token:            "meshlink-dev-token",
+		Os:               "linux",
+		Version:          "0.1.0",
+		AdvertisedRoutes: []string{"10.20.0.0/24"},
+	})
+	if err != nil {
+		t.Fatalf("register first device: %v", err)
+	}
+	if len(first.GetDevice().GetAdvertisedRoutes()) != 1 {
+		t.Fatalf("expected one advertised route, got %v", first.GetDevice().GetAdvertisedRoutes())
+	}
+
+	second, err := service.RegisterDevice(context.Background(), &pb.RegisterDeviceRequest{
+		Name:             "client-a",
+		PublicKey:        "pk-a",
+		Token:            "meshlink-dev-token",
+		Os:               "linux",
+		Version:          "0.1.1",
+		AdvertisedRoutes: []string{},
+	})
+	if err != nil {
+		t.Fatalf("register second device: %v", err)
+	}
+
+	if len(second.GetDevice().GetAdvertisedRoutes()) != 0 {
+		t.Fatalf("expected advertised routes to be cleared, got %v", second.GetDevice().GetAdvertisedRoutes())
 	}
 }
 

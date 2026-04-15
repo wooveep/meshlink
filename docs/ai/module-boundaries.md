@@ -7,7 +7,7 @@
 2. `device`
    只负责设备生命周期和元数据。
 3. `peer`
-   负责将设备、策略、地址组合为配置视图。
+   负责将设备、策略、地址组合为配置视图，并通过 Hook 链生成最终 `AllowedIPs`。
 4. `signal`
    只负责转发协商消息，不负责路径决策。
 5. `relay`
@@ -24,6 +24,8 @@
 4. `wg-manager`
    只负责 WireGuard 接口与 Peer 写入。
 5. 平台 crate 只暴露平台差异能力，不包含业务决策。
+6. `wintun-windows`
+   只负责 Windows embedded tunnel-service、服务生命周期和运行时资产检查，不处理路径选择或控制面协议。
 
 ## 修改原则
 

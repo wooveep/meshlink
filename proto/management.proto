@@ -19,6 +19,7 @@ message RegisterDeviceRequest {
   string os = 4;
   string version = 5;
   DirectEndpoint direct_endpoint = 6;
+  repeated string advertised_routes = 7;
 }
 
 message RegisterDeviceResponse {

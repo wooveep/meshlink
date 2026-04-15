@@ -1,0 +1,36 @@
+name: meshlink-client
+arch: amd64
+platform: linux
+version: ${MESHLINK_PACKAGE_VERSION}
+release: ${MESHLINK_PACKAGE_RELEASE}
+section: net
+priority: optional
+maintainer: MeshLink Maintainers
+vendor: MeshLink
+license: MIT
+depends:
+  - iproute2
+description: |
+  MeshLink Linux client package with daemon unit and manual-run config.
+contents:
+  - src: ./dist/bin/linux-amd64/client/meshlinkd
+    dst: /usr/bin/meshlinkd
+    file_info:
+      mode: 0755
+  - src: ./deploy/systemd/meshlink-client.service
+    dst: /lib/systemd/system/meshlink-client.service
+    file_info:
+      mode: 0644
+  - src: ./deploy/packages/config/client.toml
+    dst: /etc/meshlink/client.toml
+    type: config|noreplace
+    file_info:
+      mode: 0644
+  - src: ./deploy/examples/client-config.toml
+    dst: /usr/share/doc/meshlink-client/examples/client-config.toml
+    file_info:
+      mode: 0644
+  - src: ./deploy/examples/client-b-config.toml
+    dst: /usr/share/doc/meshlink-client/examples/client-b-config.toml
+    file_info:
+      mode: 0644

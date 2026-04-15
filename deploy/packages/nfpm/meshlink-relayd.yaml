@@ -1,0 +1,26 @@
+name: meshlink-relayd
+arch: amd64
+platform: linux
+version: ${MESHLINK_PACKAGE_VERSION}
+release: ${MESHLINK_PACKAGE_RELEASE}
+section: net
+priority: optional
+maintainer: MeshLink Maintainers
+vendor: MeshLink
+license: MIT
+description: |
+  MeshLink relay fallback control service and UDP forwarding package.
+contents:
+  - src: ./dist/bin/linux-amd64/server/relayd
+    dst: /usr/bin/relayd
+    file_info:
+      mode: 0755
+  - src: ./deploy/packages/env/meshlink-relayd.env
+    dst: /etc/default/meshlink-relayd.env
+    type: config|noreplace
+    file_info:
+      mode: 0644
+  - src: ./deploy/packages/examples/relayd.env.example
+    dst: /usr/share/doc/meshlink-relayd/examples/relayd.env.example
+    file_info:
+      mode: 0644

@@ -23,6 +23,7 @@ message Device {
   OverlayAddress overlay = 6;
   map<string, string> labels = 7;
   DirectEndpoint direct_endpoint = 8;
+  repeated string advertised_routes = 9;
 }
 
 message Peer {
@@ -65,4 +66,5 @@ enum SignalKind {
   SIGNAL_KIND_PUNCH_REQUEST = 2;
   SIGNAL_KIND_PUNCH_RESULT = 3;
   SIGNAL_KIND_HEARTBEAT = 4;
+  SIGNAL_KIND_HELLO = 5;
 }

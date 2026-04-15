@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 load_lab_env
+require_flat_topology
 require_commands virsh ssh scp go cargo timeout grep wg
 
 mkdir -p "$MESHLINK_LAB_STATE_DIR/runtime/bin" "$MESHLINK_LAB_STATE_DIR/runtime/config" "$MESHLINK_LAB_STATE_DIR/runtime/keys"

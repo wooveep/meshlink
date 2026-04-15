@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package meshlink.v1;
+
+option go_package = "meshlink/server/pkg/pb;pb";
+
+service RelayService {
+  rpc ReservePeerRelay(ReservePeerRelayRequest) returns (ReservePeerRelayResponse);
+  rpc ReleasePeerRelay(ReleasePeerRelayRequest) returns (ReleasePeerRelayResponse);
+}
+
+message ReservePeerRelayRequest {
+  string device_id = 1;
+  string public_key = 2;
+  string bootstrap_token = 3;
+  string peer_id = 4;
+}
+
+message ReservePeerRelayResponse {
+  string relay_host = 1;
+  uint32 udp_port = 2;
+  uint32 ttl_seconds = 3;
+  string session_id = 4;
+}
+
+message ReleasePeerRelayRequest {
+  string device_id = 1;
+  string public_key = 2;
+  string bootstrap_token = 3;
+  string peer_id = 4;
+  string session_id = 5;
+  string reason = 6;
+}
+
+message ReleasePeerRelayResponse {}

@@ -6,6 +6,7 @@ fn main() {
             &[
                 "../../../proto/common.proto",
                 "../../../proto/management.proto",
+                "../../../proto/relay.proto",
                 "../../../proto/signal.proto",
             ],
             &[proto_dir],

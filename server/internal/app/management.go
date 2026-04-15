@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"fmt"
+	"net"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -12,7 +14,6 @@ import (
 	"meshlink/server/internal/ipam"
 	"meshlink/server/internal/peer"
 	"meshlink/server/pkg/pb"
-	"time"
 )
 
 type ManagementConfig struct {
@@ -27,6 +28,8 @@ type ManagementService struct {
 	auth         *auth.TokenValidator
 	registry     *device.Registry
 	allocator    *ipam.Allocator
+	overlayNet   *net.IPNet
+	peerHooks    []peer.AllowedIPsHook
 	syncInterval time.Duration
 }
 
@@ -35,11 +38,17 @@ func NewManagementService(cfg ManagementConfig) (*ManagementService, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new allocator: %w", err)
 	}
+	_, overlayNet, err := net.ParseCIDR(cfg.OverlayCIDR)
+	if err != nil {
+		return nil, fmt.Errorf("parse overlay CIDR: %w", err)
+	}
 
 	return &ManagementService{
 		auth:         auth.NewTokenValidator(cfg.BootstrapToken),
 		registry:     device.NewRegistry(),
 		allocator:    allocator,
+		overlayNet:   overlayNet,
+		peerHooks:    peer.DefaultAllowedIPsHooks(),
 		syncInterval: cfg.SyncInterval,
 	}, nil
 }
@@ -62,6 +71,13 @@ func (s *ManagementService) RegisterDevice(ctx context.Context, req *pb.Register
 			return nil, status.Error(codes.InvalidArgument, "direct_endpoint.port is required when direct_endpoint is set")
 		}
 	}
+	advertisedRoutes, err := normalizeAdvertisedRoutes(req.GetAdvertisedRoutes())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := validateAdvertisedRoutes(advertisedRoutes, s.overlayNet, s.registry.List(), req.GetPublicKey()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 
 	overlayIP, err := s.allocator.Allocate(req.GetPublicKey())
 	if err != nil {
@@ -69,12 +85,13 @@ func (s *ManagementService) RegisterDevice(ctx context.Context, req *pb.Register
 	}
 
 	record := s.registry.Register(device.Registration{
-		Name:           req.GetName(),
-		PublicKey:      req.GetPublicKey(),
-		OS:             req.GetOs(),
-		Version:        req.GetVersion(),
-		OverlayIP:      overlayIP,
-		DirectEndpoint: fromPBDirectEndpoint(req.GetDirectEndpoint()),
+		Name:             req.GetName(),
+		PublicKey:        req.GetPublicKey(),
+		OS:               req.GetOs(),
+		Version:          req.GetVersion(),
+		OverlayIP:        overlayIP,
+		DirectEndpoint:   fromPBDirectEndpoint(req.GetDirectEndpoint()),
+		AdvertisedRoutes: advertisedRoutes,
 	})
 
 	return &pb.RegisterDeviceResponse{
@@ -128,7 +145,7 @@ func (s *ManagementService) SyncConfig(req *pb.SyncConfigRequest, stream pb.Mana
 }
 
 func (s *ManagementService) visiblePeers(selfID string) []*pb.Peer {
-	return peer.BuildVisiblePeers(selfID, s.registry.List())
+	return peer.BuildVisiblePeers(selfID, s.registry.List(), s.peerHooks...)
 }
 
 func (s *ManagementService) GetDevice(ctx context.Context, req *pb.GetDeviceRequest) (*pb.GetDeviceResponse, error) {
@@ -149,8 +166,9 @@ func toPBDevice(record *device.Record) *pb.Device {
 		Overlay: &pb.OverlayAddress{
 			Ipv4: record.OverlayIP,
 		},
-		Labels:         map[string]string{},
-		DirectEndpoint: toPBDirectEndpoint(record.DirectEndpoint),
+		Labels:           map[string]string{},
+		DirectEndpoint:   toPBDirectEndpoint(record.DirectEndpoint),
+		AdvertisedRoutes: append([]string(nil), record.AdvertisedRoutes...),
 	}
 }
 

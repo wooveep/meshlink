@@ -1,9 +1,14 @@
 node_name = "client-a"
 management_addr = "127.0.0.1:33073"
+# signal_addr = "127.0.0.1:10000"
+# relay_addr = "127.0.0.1:3478"
+# stun_addr = "127.0.0.1:3479"
 bootstrap_token = "meshlink-dev-token"
 public_key = "meshlink-client-a-public-key"
 interface_name = "sdwan0"
 log_level = "info"
+# punch_timeout = "3s"
 # private_key = "meshlink-client-a-private-key"
 # listen_port = 51820
 # advertise_host = "192.0.2.10"
+# advertised_routes = ["10.20.0.0/24"]

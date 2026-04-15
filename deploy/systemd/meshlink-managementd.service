@@ -1,9 +1,16 @@
 [Unit]
 Description=MeshLink Management Service
 After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/managementd -listen :33073
+Type=simple
+Environment="MESHLINK_MANAGEMENTD_LISTEN=:33073"
+Environment="MESHLINK_MANAGEMENTD_BOOTSTRAP_TOKEN=meshlink-dev-token"
+Environment="MESHLINK_MANAGEMENTD_OVERLAY_CIDR=100.64.0.0/10"
+Environment="MESHLINK_MANAGEMENTD_SYNC_INTERVAL=15s"
+EnvironmentFile=-/etc/default/meshlink-managementd.env
+ExecStart=/usr/bin/managementd -listen ${MESHLINK_MANAGEMENTD_LISTEN} -bootstrap-token ${MESHLINK_MANAGEMENTD_BOOTSTRAP_TOKEN} -overlay-cidr ${MESHLINK_MANAGEMENTD_OVERLAY_CIDR} -sync-interval ${MESHLINK_MANAGEMENTD_SYNC_INTERVAL}
 Restart=always
 RestartSec=3
 
