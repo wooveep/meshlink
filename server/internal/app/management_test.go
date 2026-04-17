@@ -109,14 +109,17 @@ func TestSyncConfigPublishesPeerDiscoveryUpdates(t *testing.T) {
 	if update.GetRevision() <= full.GetRevision() {
 		t.Fatalf("expected revision to advance, got %s then %s", full.GetRevision(), update.GetRevision())
 	}
-	if len(update.GetPeers()) != 1 {
-		t.Fatalf("expected one visible peer after update, got %d", len(update.GetPeers()))
+	if len(update.GetPeers()) != 0 {
+		t.Fatalf("expected incremental event to omit full peer snapshot, got %d", len(update.GetPeers()))
 	}
-	if update.GetPeers()[0].GetPeerId() != second.GetDevice().GetId() {
-		t.Fatalf("expected peer %s, got %s", second.GetDevice().GetId(), update.GetPeers()[0].GetPeerId())
+	if len(update.GetPeerUpserts()) != 1 {
+		t.Fatalf("expected one peer upsert after update, got %d", len(update.GetPeerUpserts()))
 	}
-	if update.GetPeers()[0].GetDirectEndpoint().GetHost() != "192.0.2.20" {
-		t.Fatalf("expected propagated direct endpoint, got %+v", update.GetPeers()[0].GetDirectEndpoint())
+	if update.GetPeerUpserts()[0].GetPeerId() != second.GetDevice().GetId() {
+		t.Fatalf("expected peer %s, got %s", second.GetDevice().GetId(), update.GetPeerUpserts()[0].GetPeerId())
+	}
+	if update.GetPeerUpserts()[0].GetDirectEndpoint().GetHost() != "192.0.2.20" {
+		t.Fatalf("expected propagated direct endpoint, got %+v", update.GetPeerUpserts()[0].GetDirectEndpoint())
 	}
 
 	cancel()

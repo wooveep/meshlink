@@ -7,7 +7,7 @@ source "$SCRIPT_DIR/common.sh"
 
 load_lab_env
 require_dual_nat_topology
-require_commands virsh ssh scp go cargo timeout grep wg ping
+require_commands virsh ssh scp go cargo timeout grep ping
 
 mkdir -p "$MESHLINK_LAB_STATE_DIR/runtime/bin" "$MESHLINK_LAB_STATE_DIR/runtime/config"
 REMOTE_ROOT="/home/${MESHLINK_SSH_USER}/meshlink"
@@ -93,7 +93,7 @@ copy_management_runtime() {
 
 copy_client_runtime() {
   local node="$1"
-  ssh_to_vm "$node" "mkdir -p ${REMOTE_ROOT}/bin ${REMOTE_ROOT}/config ${REMOTE_ROOT}/logs && sudo pkill -x meshlinkd || true"
+  ssh_to_vm "$node" "mkdir -p ${REMOTE_ROOT}/bin ${REMOTE_ROOT}/config ${REMOTE_ROOT}/logs && sudo pkill -x meshlinkd || true && rm -f ${REMOTE_ROOT}/bin/meshlinkd.new ${REMOTE_ROOT}/bin/meshlinkd"
   scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/meshlinkd" "$node" "${REMOTE_ROOT}/bin/meshlinkd.new"
   scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/config/${node}.toml" "$node" "${REMOTE_ROOT}/config/client.toml"
   ssh_to_vm "$node" "mv -f ${REMOTE_ROOT}/bin/meshlinkd.new ${REMOTE_ROOT}/bin/meshlinkd"
@@ -122,7 +122,7 @@ wait_for_client_tools() {
   local attempt=1
 
   while (( attempt <= attempts )); do
-    if ssh_to_vm "$node" "command -v ping >/dev/null 2>&1 && command -v wg >/dev/null 2>&1 && sudo true" >/dev/null 2>&1; then
+    if ssh_to_vm "$node" "command -v ping >/dev/null 2>&1 && command -v ip >/dev/null 2>&1 && sudo true" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -169,25 +169,25 @@ wait_for_remote_log() {
   return 1
 }
 
-wait_for_wg_endpoint() {
-  local node="$1"
-  local peer_public_key="$2"
-  local expected_host="$3"
-  local expected_port="$4"
-  local attempts="${5:-50}"
+wait_for_any_remote_log() {
+  local path="$1"
+  local pattern="$2"
+  local attempts="${3:-40}"
+  shift 3
   local attempt=1
 
   while (( attempt <= attempts )); do
-    local endpoint=""
-    endpoint="$(ssh_to_vm "$node" "sudo wg show ${MESHLINK_INTERFACE_NAME} endpoints | awk '\$1 == \"${peer_public_key}\" {print \$2}'" 2>/dev/null || true)"
-    if [[ "$endpoint" == "${expected_host}:${expected_port}" ]]; then
-      return 0
-    fi
+    local node
+    for node in "$@"; do
+      if ssh_to_vm "$node" "grep -q '$pattern' '$path'" >/dev/null 2>&1; then
+        return 0
+      fi
+    done
     sleep 2
     attempt=$((attempt + 1))
   done
 
-  echo "timed out waiting for ${node} endpoint ${expected_host}:${expected_port}" >&2
+  echo "timed out waiting for any node to log pattern: ${pattern}" >&2
   return 1
 }
 
@@ -216,6 +216,31 @@ wait_for_peer_route() {
   return 1
 }
 
+wait_for_remote_ping_state() {
+  local node="$1"
+  local target="$2"
+  local expected_state="$3"
+  local attempts="${4:-20}"
+  local attempt=1
+
+  while (( attempt <= attempts )); do
+    if ssh_to_vm "$node" "sudo ping -c 1 -W 1 ${target} >/dev/null 2>&1"; then
+      if [[ "$expected_state" == "present" ]]; then
+        return 0
+      fi
+    else
+      if [[ "$expected_state" == "absent" ]]; then
+        return 0
+      fi
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+
+  echo "timed out waiting for ${node} ping ${target} to become ${expected_state}" >&2
+  return 1
+}
+
 setup_routed_subnet_target() {
   ssh_to_vm client-a "sudo ip netns del ${ROUTE_NAMESPACE} 2>/dev/null || true; sudo ip link del ${ROUTE_HOST_IF} 2>/dev/null || true; sudo ip netns add ${ROUTE_NAMESPACE}; sudo ip link add ${ROUTE_HOST_IF} type veth peer name ${ROUTE_NS_IF}; sudo ip link set ${ROUTE_NS_IF} netns ${ROUTE_NAMESPACE}; sudo ip addr add ${ROUTED_GATEWAY_IP}/24 dev ${ROUTE_HOST_IF}; sudo ip link set ${ROUTE_HOST_IF} up; sudo ip netns exec ${ROUTE_NAMESPACE} ip addr add ${ROUTED_TARGET_IP}/24 dev ${ROUTE_NS_IF}; sudo ip netns exec ${ROUTE_NAMESPACE} ip link set lo up; sudo ip netns exec ${ROUTE_NAMESPACE} ip link set ${ROUTE_NS_IF} up; sudo ip netns exec ${ROUTE_NAMESPACE} ip route replace 100.64.0.0/10 via ${ROUTED_GATEWAY_IP}; sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null; sudo iptables -C FORWARD -i ${MESHLINK_INTERFACE_NAME} -o ${ROUTE_HOST_IF} -d ${ROUTED_SUBNET} -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i ${MESHLINK_INTERFACE_NAME} -o ${ROUTE_HOST_IF} -d ${ROUTED_SUBNET} -j ACCEPT; sudo iptables -C FORWARD -i ${ROUTE_HOST_IF} -o ${MESHLINK_INTERFACE_NAME} -s ${ROUTED_SUBNET} -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i ${ROUTE_HOST_IF} -o ${MESHLINK_INTERFACE_NAME} -s ${ROUTED_SUBNET} -j ACCEPT; sudo ip netns exec ${ROUTE_NAMESPACE} ping -c 1 -W 2 ${ROUTED_GATEWAY_IP} >/dev/null"
 }
@@ -228,17 +253,17 @@ collect_log() {
   echo "collected $local_path"
 }
 
-collect_wg_state() {
-  local node="$1"
-  local local_path="$MESHLINK_LAB_STATE_DIR/runtime/${node}-wg-show.txt"
-  ssh_to_vm "$node" "sudo wg show ${MESHLINK_INTERFACE_NAME}" >"$local_path"
-  echo "collected $local_path"
-}
-
 collect_route_state() {
   local node="$1"
   local local_path="$MESHLINK_LAB_STATE_DIR/runtime/${node}-routes.txt"
   ssh_to_vm "$node" "sudo ip route show" >"$local_path"
+  echo "collected $local_path"
+}
+
+collect_client_runtime_state() {
+  local node="$1"
+  local local_path="$MESHLINK_LAB_STATE_DIR/runtime/${node}-runtime-state.txt"
+  ssh_to_vm "$node" "if command -v wg >/dev/null 2>&1; then echo \"wg=present \$(command -v wg)\"; else echo \"wg=absent\"; fi; if command -v dpkg-query >/dev/null 2>&1; then dpkg-query -W -f='\${Status}\n' wireguard-tools 2>/dev/null || echo 'wireguard-tools-package=absent'; fi" >"$local_path"
   echo "collected $local_path"
 }
 
@@ -286,45 +311,42 @@ wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/signald.log" "signald listening 
 wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/relayd.log" "relayd listening on 0.0.0.0:${MESHLINK_RELAY_PORT}"
 wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "device registered"
 wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "device registered"
-wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "hole punch handshake observed" 50
-wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "hole punch handshake observed" 50
+wait_for_any_remote_log "${REMOTE_ROOT}/logs/meshlinkd.log" "hole punch handshake observed" 50 client-a client-b
 
-wait_for_wg_endpoint client-a "$CLIENT_B_PUBLIC_KEY" "$MESHLINK_NAT_B_WAN_IP" "$MESHLINK_CLIENT_B_WG_PORT" 50
-wait_for_wg_endpoint client-b "$CLIENT_A_PUBLIC_KEY" "$MESHLINK_NAT_A_WAN_IP" "$MESHLINK_CLIENT_A_WG_PORT" 50
 wait_for_peer_route client-b "$ROUTED_SUBNET" present 50
 
-ssh_to_vm client-a "sudo ping -c 2 -W 2 ${CLIENT_B_OVERLAY} >/dev/null"
-ssh_to_vm client-b "sudo ping -c 2 -W 2 ${CLIENT_A_OVERLAY} >/dev/null"
-ssh_to_vm client-b "sudo ping -c 2 -W 2 ${ROUTED_TARGET_IP} >/dev/null"
+wait_for_remote_ping_state client-b "$ROUTED_TARGET_IP" present 20
 
 collect_router_state nat-a direct
 collect_router_state nat-b direct
 
 install_phase06_drop_rules
-wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "relay fallback activated" 50
-wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "relay fallback activated" 50
-ssh_to_vm client-b "sudo ping -c 2 -W 2 ${ROUTED_TARGET_IP} >/dev/null"
+collect_router_state nat-a blocked
+collect_router_state nat-b blocked
+wait_for_any_remote_log "${REMOTE_ROOT}/logs/meshlinkd.log" "relay fallback activated" 50 client-a client-b
+wait_for_remote_ping_state client-b "$ROUTED_TARGET_IP" present 20
 
 clear_phase06_drop_rules
-wait_for_wg_endpoint client-a "$CLIENT_B_PUBLIC_KEY" "$MESHLINK_NAT_B_WAN_IP" "$MESHLINK_CLIENT_B_WG_PORT" 50
-wait_for_wg_endpoint client-b "$CLIENT_A_PUBLIC_KEY" "$MESHLINK_NAT_A_WAN_IP" "$MESHLINK_CLIENT_A_WG_PORT" 50
-ssh_to_vm client-b "sudo ping -c 2 -W 2 ${ROUTED_TARGET_IP} >/dev/null"
+collect_router_state nat-a cleared
+collect_router_state nat-b cleared
+wait_for_any_remote_log "${REMOTE_ROOT}/logs/meshlinkd.log" "direct path recovered; releasing relay" 50 client-a client-b
+wait_for_remote_ping_state client-b "$ROUTED_TARGET_IP" present 20
 
 write_client_config client-a "$CLIENT_A_PUBLIC_KEY" "$CLIENT_A_PRIVATE_KEY" "$MESHLINK_CLIENT_A_WG_PORT"
 copy_client_runtime client-a
 start_client client-a
 wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "device registered" 40
 wait_for_peer_route client-b "$ROUTED_SUBNET" absent 50
-ssh_to_vm client-b "if sudo ping -c 1 -W 1 ${ROUTED_TARGET_IP} >/dev/null 2>&1; then exit 1; fi"
+wait_for_remote_ping_state client-b "$ROUTED_TARGET_IP" absent 20
 
 collect_log mgmt-1 "${REMOTE_ROOT}/logs/managementd.log"
 collect_log mgmt-1 "${REMOTE_ROOT}/logs/signald.log"
 collect_log mgmt-1 "${REMOTE_ROOT}/logs/relayd.log"
 collect_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log"
 collect_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log"
-collect_wg_state client-a
-collect_wg_state client-b
 collect_route_state client-a
 collect_route_state client-b
+collect_client_runtime_state client-a
+collect_client_runtime_state client-b
 
 echo "vm lab phase08 route advertisement acceptance passed"

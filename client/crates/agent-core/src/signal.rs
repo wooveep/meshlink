@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use api_client::proto::{
     signal_envelope::Body, signal_service_client::SignalServiceClient, Candidate,
     CandidateAnnouncement, CandidateType, Heartbeat, PunchRequest, PunchResult, SignalEnvelope,
@@ -15,6 +15,7 @@ use holepunch::{
 };
 use netlink_linux::latest_handshake_timestamp;
 use relay_client::{release_peer_relay, reserve_peer_relay, RelayReservation};
+use serde::Deserialize;
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -41,13 +42,25 @@ pub struct SignalRuntime {
 }
 
 impl SignalRuntime {
-    pub fn spawn(config: AgentConfig, device_id: String) -> Option<Self> {
+    pub fn spawn(
+        config: AgentConfig,
+        device_id: String,
+        initial_candidates: Vec<Candidate>,
+    ) -> Option<Self> {
         let signal_addr = config.signal_addr.clone()?;
         let (snapshot_tx, snapshot_rx) = watch::channel(PeerSnapshot::default());
         let (update_tx, update_rx) = mpsc::channel(64);
 
         let task = tokio::spawn(async move {
-            run_signal_loop(config, device_id, signal_addr, snapshot_rx, update_tx).await;
+            run_signal_loop(
+                config,
+                device_id,
+                signal_addr,
+                snapshot_rx,
+                update_tx,
+                initial_candidates,
+            )
+            .await;
         });
 
         Some(Self {
@@ -78,6 +91,7 @@ struct PeerSignalState {
     request_received: bool,
     attempt: Option<PunchAttempt>,
     relay: Option<ActiveRelay>,
+    next_direct_retry_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,18 +138,28 @@ async fn run_signal_loop(
     signal_addr: String,
     snapshot_rx: watch::Receiver<PeerSnapshot>,
     update_tx: mpsc::Sender<SignalUpdate>,
+    mut cached_candidates: Vec<Candidate>,
 ) {
+    let mut first_connect = true;
     loop {
+        if !first_connect || cached_candidates.is_empty() {
+            cached_candidates = refresh_local_candidates(&config, &cached_candidates).await;
+        }
+        first_connect = false;
         match connect_and_run(
             &config,
             &device_id,
             &signal_addr,
             snapshot_rx.clone(),
             update_tx.clone(),
+            cached_candidates.clone(),
         )
         .await
         {
-            Ok(()) => return,
+            Ok(()) => {
+                warn!("signal stream closed; reconnecting");
+                sleep(Duration::from_secs(2)).await;
+            }
             Err(err) => {
                 warn!("signal loop disconnected: {err:#}");
                 sleep(Duration::from_secs(2)).await;
@@ -150,6 +174,7 @@ async fn connect_and_run(
     signal_addr: &str,
     mut snapshot_rx: watch::Receiver<PeerSnapshot>,
     update_tx: mpsc::Sender<SignalUpdate>,
+    local_candidates: Vec<Candidate>,
 ) -> Result<()> {
     let endpoint = api_client_endpoint(signal_addr);
     let mut client = SignalServiceClient::connect(endpoint)
@@ -175,7 +200,6 @@ async fn connect_and_run(
     let mut inbound = response.into_inner();
     info!("signal stream connected");
 
-    let local_candidates = collect_local_candidates(config).await;
     info!(
         candidates = local_candidates.len(),
         "local punch candidates collected"
@@ -251,7 +275,7 @@ async fn connect_and_run(
                 }
                 inbound_message = inbound.message() => {
                     let Some(envelope) = inbound_message.context("receive signal message")? else {
-                        break Ok(());
+                        bail!("signal stream closed by server");
                     };
                     let snapshot = snapshot_rx.borrow().clone();
                     handle_incoming_envelope(
@@ -272,6 +296,10 @@ async fn connect_and_run(
 
     cleanup_relay_sessions(config, device_id, &mut peer_states).await;
     result
+}
+
+pub async fn bootstrap_local_candidates(config: &AgentConfig) -> Vec<Candidate> {
+    refresh_local_candidates(config, &[]).await
 }
 
 async fn handle_incoming_envelope(
@@ -430,6 +458,9 @@ async fn maybe_send_punch_requests(
         if !should_initiate(device_id, &peer.peer_id) || state.remote_candidates.is_empty() {
             continue;
         }
+        if !relay_retry_due(state) {
+            continue;
+        }
         send_punch_request(
             outbound_tx,
             device_id,
@@ -496,6 +527,9 @@ async fn start_attempt_for_peer(
         return Ok(());
     }
     if !state.request_received && !should_initiate(device_id, &peer.peer_id) {
+        return Ok(());
+    }
+    if !relay_retry_due(state) {
         return Ok(());
     }
 
@@ -582,6 +616,7 @@ async fn check_attempts(
                 )
                 .await;
             }
+            state.next_direct_retry_at = None;
             continue;
         }
 
@@ -703,6 +738,11 @@ async fn fallback_to_relay(
         None
     };
 
+    if endpoint_override.is_some() {
+        state.next_direct_retry_at =
+            Some(Instant::now() + direct_retry_delay(config.punch_timeout));
+    }
+
     update_tx
         .send(SignalUpdate {
             peer_id: peer.peer_id.clone(),
@@ -761,7 +801,10 @@ async fn release_active_relay(
     }
 }
 
-async fn collect_local_candidates(config: &AgentConfig) -> Vec<Candidate> {
+async fn refresh_local_candidates(
+    config: &AgentConfig,
+    cached_candidates: &[Candidate],
+) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     let listen_port = u32::from(config.listen_port.unwrap_or_default());
     if listen_port == 0 {
@@ -803,26 +846,79 @@ async fn collect_local_candidates(config: &AgentConfig) -> Vec<Candidate> {
                 network_interface: "stun".to_string(),
                 priority: 100,
             }),
-            Err(err) => warn!("stun query failed: {err:#}"),
+            Err(err) => {
+                let cached_stun_candidates = cached_candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.r#type == CandidateType::PublicIpv4 as i32
+                            && candidate.network_interface == "stun"
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                if cached_stun_candidates.is_empty() {
+                    warn!("stun query failed: {err:#}");
+                } else {
+                    info!(
+                        candidates = cached_stun_candidates.len(),
+                        "reusing cached stun candidates after query failure"
+                    );
+                    candidates.extend(cached_stun_candidates);
+                }
+            }
         }
     }
 
     dedupe_candidates(sort_candidates(candidates))
 }
 
+fn relay_retry_due(state: &PeerSignalState) -> bool {
+    match (state.relay.is_some(), state.next_direct_retry_at) {
+        (true, Some(next_retry_at)) => Instant::now() >= next_retry_at,
+        _ => true,
+    }
+}
+
+fn direct_retry_delay(punch_timeout: Duration) -> Duration {
+    Duration::from_secs((punch_timeout.as_secs().max(3) * 3).max(10))
+}
+
 fn dedupe_candidates(candidates: Vec<Candidate>) -> Vec<Candidate> {
-    let mut seen = BTreeSet::new();
+    let mut positions = BTreeMap::new();
     let mut deduped = Vec::new();
     for candidate in candidates {
         let key = (candidate.r#type, candidate.address.clone(), candidate.port);
-        if seen.insert(key) {
-            deduped.push(candidate);
+        match positions.get(&key).copied() {
+            None => {
+                positions.insert(key, deduped.len());
+                deduped.push(candidate);
+            }
+            Some(index)
+                if candidate.network_interface == "stun"
+                    && deduped[index].network_interface != "stun" =>
+            {
+                deduped[index] = candidate;
+            }
+            Some(_) => {}
         }
     }
     deduped
 }
 
 fn collect_lan_ipv4s() -> Result<Vec<(String, String)>> {
+    #[cfg(windows)]
+    {
+        return collect_windows_lan_ipv4s();
+    }
+
+    #[cfg(not(windows))]
+    {
+        return collect_unix_lan_ipv4s();
+    }
+}
+
+#[cfg(not(windows))]
+fn collect_unix_lan_ipv4s() -> Result<Vec<(String, String)>> {
     let output = Command::new(resolve_ip_bin())
         .args(["-o", "-4", "addr", "show", "scope", "global"])
         .output()
@@ -833,6 +929,70 @@ fn collect_lan_ipv4s() -> Result<Vec<(String, String)>> {
     Ok(parse_ip_addr_output(&String::from_utf8_lossy(
         &output.stdout,
     )))
+}
+
+#[cfg(windows)]
+fn collect_windows_lan_ipv4s() -> Result<Vec<(String, String)>> {
+    let script = concat!(
+        "$configs = Get-NetIPConfiguration | ForEach-Object {",
+        "  $alias = $_.InterfaceAlias;",
+        "  foreach ($addr in $_.IPv4Address) {",
+        "    [PSCustomObject]@{IPAddress = $addr.IPAddress; InterfaceAlias = $alias}",
+        "  }",
+        "};",
+        "$configs | ConvertTo-Json -Compress"
+    );
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .output()
+        .context("run powershell for candidate collection")?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    parse_windows_interface_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Deserialize)]
+struct WindowsLanAddress {
+    #[serde(rename = "IPAddress")]
+    ip_address: String,
+    #[serde(rename = "InterfaceAlias")]
+    interface_alias: String,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_windows_interface_json(output: &str) -> Result<Vec<(String, String)>> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() || trimmed == "null" {
+        return Ok(Vec::new());
+    }
+
+    let addresses = if trimmed.starts_with('[') {
+        serde_json::from_str::<Vec<WindowsLanAddress>>(trimmed)
+            .context("parse windows candidate array")?
+    } else {
+        vec![serde_json::from_str::<WindowsLanAddress>(trimmed)
+            .context("parse windows candidate object")?]
+    };
+
+    Ok(addresses
+        .into_iter()
+        .filter_map(|address| {
+            let ip = address.ip_address.trim();
+            if ip.is_empty() || ip.starts_with("127.") || ip.starts_with("169.254.") {
+                return None;
+            }
+            Some((ip.to_string(), address.interface_alias))
+        })
+        .collect())
 }
 
 fn parse_ip_addr_output(output: &str) -> Vec<(String, String)> {
@@ -911,7 +1071,11 @@ fn probe_overlay_peer(overlay_ipv4: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_ip_addr_output, relay_host, relay_refresh_delay};
+    use super::{
+        dedupe_candidates, direct_retry_delay, parse_ip_addr_output, parse_windows_interface_json,
+        relay_host, relay_refresh_delay,
+    };
+    use api_client::proto::{Candidate, CandidateType};
     use relay_client::RelayReservation;
     use std::time::Duration;
 
@@ -925,9 +1089,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_windows_interface_json_extracts_non_loopback_ipv4_addresses() {
+        let parsed = parse_windows_interface_json(
+            r#"[{"IPAddress":"10.10.1.20","InterfaceAlias":"Ethernet"},{"IPAddress":"127.0.0.1","InterfaceAlias":"Loopback"}]"#,
+        )
+        .expect("parse windows interface json");
+
+        assert_eq!(
+            parsed,
+            vec![("10.10.1.20".to_string(), "Ethernet".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_windows_interface_json_accepts_single_object() {
+        let parsed = parse_windows_interface_json(
+            r#"{"IPAddress":"192.168.123.50","InterfaceAlias":"vEthernet"}"#,
+        )
+        .expect("parse single windows interface json object");
+
+        assert_eq!(
+            parsed,
+            vec![("192.168.123.50".to_string(), "vEthernet".to_string())]
+        );
+    }
+
+    #[test]
     fn relay_refresh_delay_uses_half_ttl() {
         assert_eq!(relay_refresh_delay(30), Duration::from_secs(15));
         assert_eq!(relay_refresh_delay(1), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn direct_retry_delay_has_floor_and_scales_with_timeout() {
+        assert_eq!(
+            direct_retry_delay(Duration::from_secs(3)),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            direct_retry_delay(Duration::from_secs(5)),
+            Duration::from_secs(15)
+        );
     }
 
     #[test]
@@ -950,5 +1152,28 @@ mod tests {
             relay_host(&fallback, "http://203.0.113.20:3478"),
             "203.0.113.20"
         );
+    }
+
+    #[test]
+    fn dedupe_candidates_prefers_stun_candidate_for_same_public_endpoint() {
+        let deduped = dedupe_candidates(vec![
+            Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: "198.51.100.10".to_string(),
+                port: 51820,
+                network_interface: "static".to_string(),
+                priority: 200,
+            },
+            Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: "198.51.100.10".to_string(),
+                port: 51820,
+                network_interface: "stun".to_string(),
+                priority: 100,
+            },
+        ]);
+
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].network_interface, "stun");
     }
 }

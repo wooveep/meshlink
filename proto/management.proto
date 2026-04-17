@@ -36,6 +36,8 @@ message SyncConfigEvent {
   Device self = 2;
   repeated Peer peers = 3;
   string revision = 4;
+  repeated Peer peer_upserts = 5;
+  repeated string removed_peer_ids = 6;
 }
 
 message GetDeviceRequest {

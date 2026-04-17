@@ -7,6 +7,7 @@ ASSET_DIR="$ROOT_DIR/deploy/packages/windows"
 CLIENT_MANIFEST="$ROOT_DIR/client/Cargo.toml"
 DEFAULT_TARGET="x86_64-pc-windows-gnu"
 DEFAULT_RUNTIME_VERSION="v0.3.17"
+DEFAULT_RUNTIME_AUTO_STAGE="1"
 
 derive_version() {
   awk '
@@ -26,6 +27,25 @@ require_file() {
     echo "required file does not exist: $path" >&2
     exit 1
   fi
+}
+
+maybe_stage_runtime() {
+  if [[ -f "$MESHLINK_WINDOWS_TUNNEL_DLL" && -f "$MESHLINK_WINDOWS_WIREGUARD_DLL" && -f "$MESHLINK_WINDOWS_WINTUN_DLL" ]]; then
+    return 0
+  fi
+
+  if [[ "${MESHLINK_WINDOWS_RUNTIME_AUTO_STAGE:-$DEFAULT_RUNTIME_AUTO_STAGE}" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ ! -x "$ROOT_DIR/scripts/build-wireguard-windows-runtime.sh" ]]; then
+    return 0
+  fi
+
+  echo "Windows runtime assets are missing; attempting to stage pinned runtime first" >&2
+  MESHLINK_WINDOWS_RUNTIME_VERSION="$MESHLINK_WINDOWS_RUNTIME_VERSION" \
+  MESHLINK_WINDOWS_RUNTIME_ARCH="$RUNTIME_ARCH" \
+  "$ROOT_DIR/scripts/build-wireguard-windows-runtime.sh"
 }
 
 require_windows_target() {
@@ -63,7 +83,7 @@ build_windows_binary() {
     --manifest-path "$CLIENT_MANIFEST" \
     --release \
     --bin meshlinkd \
-    --target "$target"
+    --target "$target" || return $?
 
   printf '%s\n' "$ROOT_DIR/client/target/$target/release/meshlinkd.exe"
 }
@@ -91,15 +111,18 @@ RUNTIME_ARCH="$(runtime_arch_dir "$MESHLINK_WINDOWS_TARGET")"
 DEFAULT_RUNTIME_DIR="$ASSET_DIR/runtime/$MESHLINK_WINDOWS_RUNTIME_VERSION/$RUNTIME_ARCH"
 MESHLINK_WINDOWS_TUNNEL_DLL="${MESHLINK_WINDOWS_TUNNEL_DLL:-$DEFAULT_RUNTIME_DIR/tunnel.dll}"
 MESHLINK_WINDOWS_WIREGUARD_DLL="${MESHLINK_WINDOWS_WIREGUARD_DLL:-$DEFAULT_RUNTIME_DIR/wireguard.dll}"
+MESHLINK_WINDOWS_WINTUN_DLL="${MESHLINK_WINDOWS_WINTUN_DLL:-$DEFAULT_RUNTIME_DIR/wintun.dll}"
 
 require_file "$ASSET_DIR/client.toml"
 require_file "$ASSET_DIR/README.txt"
 require_file "$ASSET_DIR/run-meshlinkd.ps1"
+maybe_stage_runtime
 require_file "$MESHLINK_WINDOWS_TUNNEL_DLL"
 require_file "$MESHLINK_WINDOWS_WIREGUARD_DLL"
+require_file "$MESHLINK_WINDOWS_WINTUN_DLL"
 
 if [[ -z "$MESHLINK_WINDOWS_BINARY" ]]; then
-  MESHLINK_WINDOWS_BINARY="$(build_windows_binary "$MESHLINK_WINDOWS_TARGET")"
+  MESHLINK_WINDOWS_BINARY="$(build_windows_binary "$MESHLINK_WINDOWS_TARGET")" || exit $?
 fi
 
 require_file "$MESHLINK_WINDOWS_BINARY"
@@ -114,11 +137,12 @@ rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 
 install -m 0755 "$MESHLINK_WINDOWS_BINARY" "$STAGE_DIR/meshlinkd.exe"
-install -m 0644 "$ASSET_DIR/client.toml" "$STAGE_DIR/client.toml"
+install -m 0644 "$ASSET_DIR/client.toml" "$STAGE_DIR/client.example.toml"
 install -m 0644 "$ASSET_DIR/README.txt" "$STAGE_DIR/README.txt"
 install -m 0644 "$ASSET_DIR/run-meshlinkd.ps1" "$STAGE_DIR/run-meshlinkd.ps1"
 install -m 0644 "$MESHLINK_WINDOWS_TUNNEL_DLL" "$STAGE_DIR/tunnel.dll"
 install -m 0644 "$MESHLINK_WINDOWS_WIREGUARD_DLL" "$STAGE_DIR/wireguard.dll"
+install -m 0644 "$MESHLINK_WINDOWS_WINTUN_DLL" "$STAGE_DIR/wintun.dll"
 
 rm -f "$ZIP_PATH"
 (

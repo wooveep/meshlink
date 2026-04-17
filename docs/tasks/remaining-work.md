@@ -2,9 +2,9 @@
 
 ## Goal
 
-Keep the remaining delivery sequence decision-complete so the project finishes
-the embedded WireGuard runtime transition without reopening protocol or route
-distribution design.
+Keep the delivery record decision-complete now that the embedded WireGuard
+runtime transition is validated, and make the next roadmap focus explicit
+without reopening protocol or route-distribution design.
 
 ## Tasks
 
@@ -134,13 +134,14 @@ Verification:
 
 ### TASK-019 Add the embedded Windows tunnel-service runtime path
 
-Status: `in_progress`
+Status: `done`
 
 Deliverables:
 
 1. `meshlinkd.exe /service <config>` entrypoint for `WireGuardTunnelService`
 2. `wintun-windows` service install/update flow using `WireGuardTunnel$<interface>`
-3. Package-local runtime asset checks for `tunnel.dll` and `wireguard.dll`
+3. Package-local runtime asset checks for `tunnel.dll`, `wireguard.dll`, and
+   `wintun.dll`
 
 Verification:
 
@@ -149,31 +150,65 @@ Verification:
 
 ### TASK-020 Pin and stage Windows runtime assets in the packaging flow
 
-Status: `in_progress`
+Status: `done`
 
 Deliverables:
 
 1. Versioned runtime asset layout under `deploy/packages/windows/runtime/`
-2. `scripts/package-windows.sh` support for staged DLLs and explicit overrides
-3. A Windows build/staging helper for source-built `tunnel.dll`
+2. `scripts/package-windows.sh` support for staged DLLs, auto-staging on Linux,
+   and explicit overrides
+3. Linux and Windows build/staging helpers for the runtime DLL set
+4. Pinned `amd64` runtime DLLs and manifest staged for the current package line
 
 Verification:
 
 1. `bash -n scripts/package-windows.sh`
-2. `pwsh -NoProfile -File scripts/build-wireguard-windows-runtime.ps1 -?`
+2. `bash -n scripts/build-wireguard-windows-runtime.sh`
 
 ### TASK-021 Validate Linux and Windows embedded-runtime regression paths
 
-Status: `pending`
+Status: `done`
 
 Deliverables:
 
-1. Linux regression pass without `wireguard-tools`
-2. Windows VM validation against one Linux peer using package-local runtime DLLs
-3. Direct, relay, route advertisement, and route withdrawal checks captured for
-   the embedded-runtime path
+1. Linux regression artifacts now capture guest runtime state showing the guest
+   path no longer depends on `wireguard-tools`, while the host harness may
+   still use local `wg` helpers for test key generation and inspection
+2. Windows VM scripted validation now covers package-local runtime DLLs,
+   direct, relay fallback, direct recovery, route advertisement, and route
+   withdrawal against the dual-NAT lab
+3. Both scripted paths emit compact pass/fail summaries plus artifacts for the
+   embedded-runtime acceptance path
 
 Verification:
 
 1. `MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/nat-lab/run-phase08-routes.sh`
-2. Manual Windows VM validation against one Linux peer
+2. `MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/windows-vm/run-phase08-validation.sh`
+
+## Next Focus
+
+1. Add ACL, policy, and finer-grained route-distribution controls
+2. Improve observability, upgrade flow, and long-running stability coverage
+3. Add targeted rolling-upgrade coverage around legacy full-view incremental
+   compatibility
+
+### TASK-022 Promote `SyncConfig` incremental updates to a true peer patch model
+
+Status: `done`
+
+Deliverables:
+
+1. `proto/management.proto` now distinguishes `FULL.peers` from
+   `INCREMENTAL.peer_upserts` and `INCREMENTAL.removed_peer_ids`
+2. `managementd` now computes per-stream peer deltas instead of re-sending the
+   latest full peer view on every incremental event
+3. The Rust client now applies patches into its peer cache and reconciles
+   WireGuard state from the cache's converged snapshot
+4. The Rust client still accepts legacy incremental events that carry a full
+   peer view, so rolling upgrades remain safe
+
+Verification:
+
+1. `./scripts/gen-proto.sh`
+2. `cd server && go test ./...`
+3. `cargo test --manifest-path client/Cargo.toml --workspace`

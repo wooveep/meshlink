@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -60,7 +61,10 @@ func (s *Service) RunCleanup(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			s.hub.ReapExpired(now, s.heartbeatTimeout)
+			expired := s.hub.ReapExpired(now, s.heartbeatTimeout)
+			for _, deviceID := range expired {
+				log.Printf("signal session expired device_id=%s timeout=%s", deviceID, s.heartbeatTimeout)
+			}
 		}
 	}
 }
@@ -85,32 +89,58 @@ func (s *Service) OpenSignal(stream pb.SignalService_OpenSignalServer) error {
 
 	deviceID := hello.GetDeviceId()
 	if err := s.validateHello(stream.Context(), hello); err != nil {
+		log.Printf("signal hello rejected device_id=%s: %v", deviceID, err)
 		return err
 	}
+	log.Printf("signal hello accepted device_id=%s", deviceID)
 
 	session := NewSession(deviceID, time.Now())
-	s.hub.Register(session)
-	defer s.hub.Remove(session)
+	if replaced := s.hub.Register(session); replaced != nil {
+		log.Printf("signal session replaced device_id=%s", deviceID)
+	}
+	log.Printf("signal session registered device_id=%s", deviceID)
+	defer func() {
+		s.hub.Remove(session)
+		log.Printf("signal session removed device_id=%s", deviceID)
+	}()
 
 	errCh := make(chan error, 1)
 	go func() {
 		for {
 			select {
 			case <-stream.Context().Done():
+				log.Printf("signal stream context done device_id=%s", deviceID)
 				errCh <- nil
 				return
 			case <-session.Closed():
+				log.Printf("signal outbound loop closed device_id=%s", deviceID)
 				errCh <- status.Error(codes.Aborted, "signal session replaced or expired")
 				return
 			case outbound, ok := <-session.Outbound():
 				if !ok {
+					log.Printf("signal outbound channel closed device_id=%s", deviceID)
 					errCh <- nil
 					return
 				}
 				if err := stream.Send(outbound); err != nil {
+					log.Printf(
+						"signal send failed device_id=%s source_device_id=%s target_device_id=%s kind=%s err=%v",
+						deviceID,
+						outbound.GetSourceDeviceId(),
+						outbound.GetTargetDeviceId(),
+						outbound.GetKind(),
+						err,
+					)
 					errCh <- err
 					return
 				}
+				log.Printf(
+					"signal delivered device_id=%s source_device_id=%s target_device_id=%s kind=%s",
+					deviceID,
+					outbound.GetSourceDeviceId(),
+					outbound.GetTargetDeviceId(),
+					outbound.GetKind(),
+				)
 			}
 		}
 	}()
@@ -118,6 +148,7 @@ func (s *Service) OpenSignal(stream pb.SignalService_OpenSignalServer) error {
 	for {
 		select {
 		case <-session.Closed():
+			log.Printf("signal session closed while receiving device_id=%s", deviceID)
 			return status.Error(codes.Aborted, "signal session replaced or expired")
 		case err := <-errCh:
 			return err
@@ -127,8 +158,10 @@ func (s *Service) OpenSignal(stream pb.SignalService_OpenSignalServer) error {
 		envelope, err := stream.Recv()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				log.Printf("signal stream closed by client device_id=%s", deviceID)
 				return nil
 			}
+			log.Printf("signal recv failed device_id=%s: %v", deviceID, err)
 			return err
 		}
 
@@ -171,6 +204,7 @@ func (s *Service) validateHello(ctx context.Context, hello *pb.SignalHello) erro
 func (s *Service) handleEnvelope(session *Session, envelope *pb.SignalEnvelope) error {
 	switch envelope.GetKind() {
 	case pb.SignalKind_SIGNAL_KIND_HEARTBEAT:
+		log.Printf("signal heartbeat device_id=%s", session.DeviceID())
 		return nil
 	case pb.SignalKind_SIGNAL_KIND_CANDIDATES,
 		pb.SignalKind_SIGNAL_KIND_PUNCH_REQUEST,
@@ -203,7 +237,24 @@ func (s *Service) handleEnvelope(session *Session, envelope *pb.SignalEnvelope) 
 			return status.Error(codes.InvalidArgument, "signal body does not match kind")
 		}
 
-		_ = s.hub.Route(envelope.GetTargetDeviceId(), forwarded)
+		routed := s.hub.Route(envelope.GetTargetDeviceId(), forwarded)
+		if routed {
+			log.Printf(
+				"signal routed source_device_id=%s target_device_id=%s kind=%s session_id=%s",
+				session.DeviceID(),
+				envelope.GetTargetDeviceId(),
+				envelope.GetKind(),
+				envelope.GetSessionId(),
+			)
+		} else {
+			log.Printf(
+				"signal route missed source_device_id=%s target_device_id=%s kind=%s session_id=%s",
+				session.DeviceID(),
+				envelope.GetTargetDeviceId(),
+				envelope.GetKind(),
+				envelope.GetSessionId(),
+			)
+		}
 		return nil
 	default:
 		return status.Errorf(codes.InvalidArgument, "unsupported signal kind: %s", envelope.GetKind())

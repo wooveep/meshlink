@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	gproto "google.golang.org/protobuf/proto"
 
 	"meshlink/server/internal/auth"
 	"meshlink/server/internal/device"
@@ -101,27 +103,21 @@ func (s *ManagementService) RegisterDevice(ctx context.Context, req *pb.Register
 }
 
 func (s *ManagementService) SyncConfig(req *pb.SyncConfigRequest, stream pb.ManagementService_SyncConfigServer) error {
-	if _, ok := s.registry.GetByID(req.GetDeviceId()); !ok {
+	record, ok := s.registry.GetByID(req.GetDeviceId())
+	if !ok {
 		return status.Error(codes.NotFound, "device not found")
 	}
 
 	updates, cancel := s.registry.Subscribe()
 	defer cancel()
 
-	send := func(eventType pb.SyncConfigEventType) error {
-		record, ok := s.registry.GetByID(req.GetDeviceId())
-		if !ok {
-			return status.Error(codes.NotFound, "device not found")
-		}
-		return stream.Send(&pb.SyncConfigEvent{
-			Type:     eventType,
-			Self:     toPBDevice(record),
-			Peers:    s.visiblePeers(record.ID),
-			Revision: s.registry.CurrentRevision(),
-		})
-	}
-
-	if err := send(pb.SyncConfigEventType_SYNC_CONFIG_EVENT_TYPE_FULL); err != nil {
+	lastPeers := indexPeersByID(s.visiblePeers(record.ID))
+	if err := stream.Send(&pb.SyncConfigEvent{
+		Type:     pb.SyncConfigEventType_SYNC_CONFIG_EVENT_TYPE_FULL,
+		Self:     toPBDevice(record),
+		Peers:    peerMapValues(lastPeers),
+		Revision: s.registry.CurrentRevision(),
+	}); err != nil {
 		return err
 	}
 
@@ -133,15 +129,94 @@ func (s *ManagementService) SyncConfig(req *pb.SyncConfigRequest, stream pb.Mana
 		case <-stream.Context().Done():
 			return nil
 		case <-updates:
-			if err := send(pb.SyncConfigEventType_SYNC_CONFIG_EVENT_TYPE_INCREMENTAL); err != nil {
+			currentRecord, ok := s.registry.GetByID(req.GetDeviceId())
+			if !ok {
+				return status.Error(codes.NotFound, "device not found")
+			}
+			nextPeers := indexPeersByID(s.visiblePeers(currentRecord.ID))
+			peerUpserts, removedPeerIDs := diffPeerMaps(lastPeers, nextPeers)
+			lastPeers = nextPeers
+
+			if err := stream.Send(&pb.SyncConfigEvent{
+				Type:           pb.SyncConfigEventType_SYNC_CONFIG_EVENT_TYPE_INCREMENTAL,
+				Self:           toPBDevice(currentRecord),
+				Revision:       s.registry.CurrentRevision(),
+				PeerUpserts:    peerUpserts,
+				RemovedPeerIds: removedPeerIDs,
+			}); err != nil {
 				return err
 			}
 		case <-ticker.C:
-			if err := send(pb.SyncConfigEventType_SYNC_CONFIG_EVENT_TYPE_INCREMENTAL); err != nil {
+			currentRecord, ok := s.registry.GetByID(req.GetDeviceId())
+			if !ok {
+				return status.Error(codes.NotFound, "device not found")
+			}
+			if err := stream.Send(&pb.SyncConfigEvent{
+				Type:     pb.SyncConfigEventType_SYNC_CONFIG_EVENT_TYPE_INCREMENTAL,
+				Self:     toPBDevice(currentRecord),
+				Revision: s.registry.CurrentRevision(),
+			}); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+func indexPeersByID(peers []*pb.Peer) map[string]*pb.Peer {
+	indexed := make(map[string]*pb.Peer, len(peers))
+	for _, peer := range peers {
+		if peer.GetPeerId() == "" {
+			continue
+		}
+		indexed[peer.GetPeerId()] = peer
+	}
+	return indexed
+}
+
+func peerMapValues(peers map[string]*pb.Peer) []*pb.Peer {
+	ids := make([]string, 0, len(peers))
+	for peerID := range peers {
+		ids = append(ids, peerID)
+	}
+	sort.Strings(ids)
+
+	values := make([]*pb.Peer, 0, len(ids))
+	for _, peerID := range ids {
+		values = append(values, peers[peerID])
+	}
+	return values
+}
+
+func diffPeerMaps(previous, current map[string]*pb.Peer) ([]*pb.Peer, []string) {
+	currentIDs := make([]string, 0, len(current))
+	for peerID := range current {
+		currentIDs = append(currentIDs, peerID)
+	}
+	sort.Strings(currentIDs)
+
+	peerUpserts := make([]*pb.Peer, 0)
+	for _, peerID := range currentIDs {
+		currentPeer := current[peerID]
+		previousPeer, ok := previous[peerID]
+		if !ok || !gproto.Equal(previousPeer, currentPeer) {
+			peerUpserts = append(peerUpserts, currentPeer)
+		}
+	}
+
+	previousIDs := make([]string, 0, len(previous))
+	for peerID := range previous {
+		previousIDs = append(previousIDs, peerID)
+	}
+	sort.Strings(previousIDs)
+
+	removedPeerIDs := make([]string, 0)
+	for _, peerID := range previousIDs {
+		if _, ok := current[peerID]; !ok {
+			removedPeerIDs = append(removedPeerIDs, peerID)
+		}
+	}
+
+	return peerUpserts, removedPeerIDs
 }
 
 func (s *ManagementService) visiblePeers(selfID string) []*pb.Peer {

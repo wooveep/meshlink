@@ -12,7 +12,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use api_client::proto::management_service_client::ManagementServiceClient;
 use api_client::proto::{
-    DirectEndpoint, Peer, RegisterDeviceRequest, SyncConfigEvent, SyncConfigEventType,
+    Device, DirectEndpoint, Peer, RegisterDeviceRequest, SyncConfigEvent, SyncConfigEventType,
     SyncConfigRequest,
 };
 use netlink_linux::LinuxWireGuardBackend;
@@ -171,9 +171,11 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
         "device registered"
     );
 
-    let mut signal_runtime = signal::SignalRuntime::spawn(config.clone(), device.id.clone());
+    let initial_signal_candidates = signal::bootstrap_local_candidates(config).await;
+    let mut signal_runtime =
+        signal::SignalRuntime::spawn(config.clone(), device.id.clone(), initial_signal_candidates);
     let mut endpoint_overrides = BTreeMap::<String, Endpoint>::new();
-    let mut last_event: Option<SyncConfigEvent> = None;
+    let mut last_self_device: Option<Device> = None;
 
     let mut stream = client
         .sync_config(SyncConfigRequest {
@@ -196,45 +198,58 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
                 let Some(event) = event.context("receive config event")? else {
                     break;
                 };
-        let event_type = describe_event_type(event.r#type);
-        let update = peer_cache.apply_event(&event);
-        if !update.applied {
-            info!(
-                event_type,
-                revision = %event.revision,
-                current_revision = %update.current_revision,
-                "ignored stale config event"
-            );
-            continue;
-        }
+                let event_type = describe_event_type(event.r#type);
+                let update = peer_cache.apply_event(&event);
+                if !update.applied {
+                    info!(
+                        event_type,
+                        revision = %event.revision,
+                        current_revision = %update.current_revision,
+                        "ignored stale config event"
+                    );
+                    continue;
+                }
 
-        for change in &update.changes {
-            info!(
-                event_type,
-                revision = %event.revision,
-                peer_id = %change.peer_id,
-                change = %change.kind,
-                "peer cache updated"
-            );
-        }
+                let self_device = event
+                    .self_
+                    .clone()
+                    .ok_or_else(|| anyhow!("config event missing self device"))?;
+                last_self_device = Some(self_device.clone());
 
-        let snapshot = peer_cache.snapshot();
-        if let Some(runtime) = signal_runtime.as_ref() {
-            runtime.publish_snapshot(snapshot.clone());
-        }
-        info!(
-            event_type,
-            revision = %snapshot.revision,
-            peers = event.peers.len(),
-            tracked_peers = snapshot.peers.len(),
-            peer_added = update.added,
-            peer_updated = update.updated,
-            peer_removed = update.removed,
-            "received config event"
-        );
+                for change in &update.changes {
+                    info!(
+                        event_type,
+                        revision = %event.revision,
+                        peer_id = %change.peer_id,
+                        change = %change.kind,
+                        "peer cache updated"
+                    );
+                }
 
-        last_event = Some(event.clone());
-        reconcile_wireguard_state(config, backend.as_ref(), &event, &endpoint_overrides)?;
+                let snapshot = peer_cache.snapshot();
+                if let Some(runtime) = signal_runtime.as_ref() {
+                    runtime.publish_snapshot(snapshot.clone());
+                }
+                info!(
+                    event_type,
+                    revision = %snapshot.revision,
+                    payload_full_peers = event.peers.len(),
+                    payload_peer_upserts = event.peer_upserts.len(),
+                    payload_peer_removals = event.removed_peer_ids.len(),
+                    tracked_peers = snapshot.peers.len(),
+                    peer_added = update.added,
+                    peer_updated = update.updated,
+                    peer_removed = update.removed,
+                    "received config event"
+                );
+
+                reconcile_wireguard_state(
+                    config,
+                    backend.as_ref(),
+                    &self_device,
+                    &snapshot.peers,
+                    &endpoint_overrides,
+                )?;
             }
             update = signal_update => {
                 let Some(update) = update else {
@@ -256,8 +271,15 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
                     "signal update applied"
                 );
 
-                if let Some(event) = last_event.as_ref() {
-                    reconcile_wireguard_state(config, backend.as_ref(), event, &endpoint_overrides)?;
+                if let Some(self_device) = last_self_device.as_ref() {
+                    let snapshot = peer_cache.snapshot();
+                    reconcile_wireguard_state(
+                        config,
+                        backend.as_ref(),
+                        self_device,
+                        &snapshot.peers,
+                        &endpoint_overrides,
+                    )?;
                     if let Some(probe_overlay_ipv4) = update.probe_overlay_ipv4.as_deref() {
                         trigger_wireguard_probe(probe_overlay_ipv4);
                     }
@@ -272,7 +294,8 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
 fn reconcile_wireguard_state(
     config: &AgentConfig,
     backend: Option<&RuntimeWireGuardBackend>,
-    event: &SyncConfigEvent,
+    self_device: &Device,
+    peers: &[CachedPeer],
     endpoint_overrides: &BTreeMap<String, Endpoint>,
 ) -> Result<()> {
     let Some(backend) = backend else {
@@ -283,16 +306,12 @@ fn reconcile_wireguard_state(
         return Ok(());
     };
 
-    let self_device = event
-        .self_
-        .as_ref()
-        .ok_or_else(|| anyhow!("config event missing self device"))?;
     let outcome = build_desired_state_with_overrides(
         &config.interface_name,
         &settings.private_key,
         settings.listen_port,
         self_device,
-        &event.peers,
+        &cached_peers_to_proto(peers),
         endpoint_overrides,
     )
     .context("build wireguard desired state")?;
@@ -318,6 +337,10 @@ fn reconcile_wireguard_state(
     );
 
     Ok(())
+}
+
+fn cached_peers_to_proto(peers: &[CachedPeer]) -> Vec<Peer> {
+    peers.iter().map(CachedPeer::to_proto).collect()
 }
 
 fn log_data_plane_mode(config: &AgentConfig) {
@@ -463,6 +486,24 @@ impl CachedPeer {
                 .map(CachedDirectEndpoint::from_proto),
         }
     }
+
+    fn to_proto(&self) -> Peer {
+        Peer {
+            peer_id: self.peer_id.clone(),
+            public_key: self.public_key.clone(),
+            overlay: Some(api_client::proto::OverlayAddress {
+                ipv4: self.overlay_ipv4.clone(),
+                ipv6: self.overlay_ipv6.clone(),
+            }),
+            allowed_ips: self.allowed_ips.clone(),
+            preferred_path: self.preferred_path,
+            direct_endpoint: self
+                .direct_endpoint
+                .as_ref()
+                .map(CachedDirectEndpoint::to_proto),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -476,6 +517,13 @@ impl CachedDirectEndpoint {
         Self {
             host: endpoint.host.clone(),
             port: endpoint.port,
+        }
+    }
+
+    fn to_proto(&self) -> DirectEndpoint {
+        DirectEndpoint {
+            host: self.host.clone(),
+            port: self.port,
         }
     }
 }
@@ -523,13 +571,18 @@ impl PeerCache {
             };
         }
 
-        let mut next = BTreeMap::new();
-        for peer in &event.peers {
-            if peer.peer_id.is_empty() {
-                continue;
+        let next = match SyncConfigEventType::try_from(event.r#type).ok() {
+            Some(SyncConfigEventType::Full) => full_snapshot_from_event(event),
+            Some(SyncConfigEventType::Incremental)
+                if event.peer_upserts.is_empty() && event.removed_peer_ids.is_empty() =>
+            {
+                full_snapshot_from_event(event)
             }
-            next.insert(peer.peer_id.clone(), CachedPeer::from_proto(peer));
-        }
+            Some(SyncConfigEventType::Incremental) => {
+                patched_snapshot_from_event(&self.peers, event)
+            }
+            _ => full_snapshot_from_event(event),
+        };
 
         let mut changes = Vec::new();
         let mut added = 0;
@@ -586,6 +639,40 @@ impl PeerCache {
             peers: self.peers.values().cloned().collect(),
         }
     }
+}
+
+fn full_snapshot_from_event(event: &SyncConfigEvent) -> BTreeMap<String, CachedPeer> {
+    let mut next = BTreeMap::new();
+    for peer in &event.peers {
+        if peer.peer_id.is_empty() {
+            continue;
+        }
+        next.insert(peer.peer_id.clone(), CachedPeer::from_proto(peer));
+    }
+    next
+}
+
+fn patched_snapshot_from_event(
+    current: &BTreeMap<String, CachedPeer>,
+    event: &SyncConfigEvent,
+) -> BTreeMap<String, CachedPeer> {
+    let mut next = current.clone();
+
+    for peer in &event.peer_upserts {
+        if peer.peer_id.is_empty() {
+            continue;
+        }
+        next.insert(peer.peer_id.clone(), CachedPeer::from_proto(peer));
+    }
+
+    for peer_id in &event.removed_peer_ids {
+        if peer_id.is_empty() {
+            continue;
+        }
+        next.remove(peer_id);
+    }
+
+    next
 }
 
 fn describe_event_type(raw: i32) -> &'static str {
@@ -714,7 +801,7 @@ advertised_routes = ["10.20.0.0/24"]
     }
 
     #[test]
-    fn newer_event_replaces_existing_view() {
+    fn incremental_patch_updates_existing_peer() {
         let mut cache = PeerCache::default();
         cache.apply_event(&SyncConfigEvent {
             r#type: SyncConfigEventType::Full as i32,
@@ -726,7 +813,7 @@ advertised_routes = ["10.20.0.0/24"]
         let update = cache.apply_event(&SyncConfigEvent {
             r#type: SyncConfigEventType::Incremental as i32,
             revision: "00000000000000000002".to_string(),
-            peers: vec![peer("dev-b", "pk-b-new", "100.64.0.22")],
+            peer_upserts: vec![peer("dev-b", "pk-b-new", "100.64.0.22")],
             ..Default::default()
         });
 
@@ -738,7 +825,7 @@ advertised_routes = ["10.20.0.0/24"]
     }
 
     #[test]
-    fn missing_peer_is_removed_from_cache() {
+    fn incremental_patch_removes_missing_peer() {
         let mut cache = PeerCache::default();
         cache.apply_event(&SyncConfigEvent {
             r#type: SyncConfigEventType::Full as i32,
@@ -753,11 +840,35 @@ advertised_routes = ["10.20.0.0/24"]
         let update = cache.apply_event(&SyncConfigEvent {
             r#type: SyncConfigEventType::Incremental as i32,
             revision: "00000000000000000002".to_string(),
+            removed_peer_ids: vec!["dev-b".to_string()],
+            ..Default::default()
+        });
+
+        assert!(update.applied);
+        assert_eq!(update.removed, 1);
+        assert_eq!(cache.snapshot().peers.len(), 1);
+        assert_eq!(cache.snapshot().peers[0].peer_id, "dev-c");
+    }
+
+    #[test]
+    fn legacy_incremental_full_view_still_replaces_existing_view() {
+        let mut cache = PeerCache::default();
+        cache.apply_event(&SyncConfigEvent {
+            r#type: SyncConfigEventType::Full as i32,
+            revision: "00000000000000000001".to_string(),
+            peers: vec![peer("dev-b", "pk-b", "100.64.0.2")],
+            ..Default::default()
+        });
+
+        let update = cache.apply_event(&SyncConfigEvent {
+            r#type: SyncConfigEventType::Incremental as i32,
+            revision: "00000000000000000002".to_string(),
             peers: vec![peer("dev-c", "pk-c", "100.64.0.3")],
             ..Default::default()
         });
 
         assert!(update.applied);
+        assert_eq!(update.added, 1);
         assert_eq!(update.removed, 1);
         assert_eq!(cache.snapshot().peers.len(), 1);
         assert_eq!(cache.snapshot().peers[0].peer_id, "dev-c");

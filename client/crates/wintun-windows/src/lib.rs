@@ -1,8 +1,13 @@
-use std::{path::{Path, PathBuf}, process::Command};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 #[cfg(windows)]
 use std::{ffi::OsStr, fs, os::windows::ffi::OsStrExt};
 
+#[cfg(windows)]
+use anyhow::anyhow;
 use anyhow::{bail, Context, Result};
 use wg_manager::{DesiredState, WireGuardBackend};
 
@@ -75,9 +80,7 @@ fn run_windows_service(config_path: &Path) -> Result<()> {
     unsafe {
         let library = libloading::Library::new(&tunnel_path)
             .with_context(|| format!("load tunnel service library {}", tunnel_path.display()))?;
-        let service: libloading::Symbol<
-            unsafe extern "system" fn(*const u16) -> u32,
-        > = library
+        let service: libloading::Symbol<unsafe extern "system" fn(*const u16) -> u32> = library
             .get(b"WireGuardTunnelService\0")
             .context("resolve WireGuardTunnelService export")?;
         let exit_code = service(config_wide.as_ptr());
@@ -193,6 +196,7 @@ fn service_bin_path(binary: &Path, config_path: &Path) -> String {
 fn ensure_runtime_assets_present() -> Result<()> {
     resolve_runtime_asset("tunnel.dll")?;
     resolve_runtime_asset("wireguard.dll")?;
+    resolve_runtime_asset("wintun.dll")?;
     Ok(())
 }
 

@@ -3,8 +3,8 @@
 ## Current milestone
 
 Control-plane delivery now includes static route publication over the existing
-peer view, and the client runtime is being moved from external WireGuard tools
-to embedded Linux and Windows integration paths.
+peer view, and the embedded Linux and Windows runtime transition is validated
+end to end in the dual-NAT acceptance lab.
 
 ## Completed
 
@@ -68,40 +68,58 @@ to embedded Linux and Windows integration paths.
 28. `meshlinkd.exe` now supports `/service <config>` and `wintun-windows` can
     manage a `WireGuardTunnel$<interface>` service around package-local runtime
     assets.
-29. `package-windows.sh` now expects pinned `tunnel.dll` and `wireguard.dll`
-    inputs, and the repository includes a helper script to stage a source-built
-    `tunnel.dll`.
+29. `package-windows.sh` now auto-stages pinned `tunnel.dll`,
+    `wireguard.dll`, and `wintun.dll` inputs on Linux, and the repository
+    includes both Linux and Windows helper scripts for runtime staging.
+30. The pinned `amd64` runtime set is staged locally, and the refreshed Windows
+    zip package now includes `meshlinkd.exe`, `tunnel.dll`, `wireguard.dll`,
+    and `wintun.dll`.
+31. Manual Windows VM validation identified `wintun.dll` as a missing runtime
+    dependency, after which a refreshed package booted the embedded
+    `WireGuardTunnel$MeshLink` service successfully and restored the `MeshLink`
+    overlay interface on reboot.
+32. `run-phase05.sh` now provisions `relayd` plus `relay_addr` for Linux
+    dual-NAT clients, and `run-phase08-validation.sh` provides a repeatable
+    Windows VM acceptance path for package deployment, same-side direct
+    peering, and opposite-side relay fallback.
+33. `run-phase08-validation.sh` now completes the full Windows embedded-runtime
+    acceptance path: package refresh and QGA deploy, direct connectivity, relay
+    fallback, direct recovery, route advertisement, and route withdrawal.
+34. `run-phase08-routes.sh` now records guest runtime state alongside the Linux
+    route regression so the guest path proves it no longer depends on
+    `wireguard-tools`, while the host harness may still use local `wg` helpers
+    for test key generation and inspection.
+35. `SyncConfig` now sends real peer patches on `INCREMENTAL` events through
+    `peer_upserts` and `removed_peer_ids`, while clients reconcile WireGuard
+    state from their cache's converged view instead of treating incremental
+    payloads as full snapshots.
 
 ## Next
 
-1. Stage pinned Windows runtime DLLs under
-   `deploy/packages/windows/runtime/v0.3.17/amd64/`.
-2. Use the Windows VM package-first path to verify one Windows node against one
-   Linux node for direct, relay fallback, route advertisement, and route
-   withdrawal behavior.
-3. Re-run the dual-NAT Linux regression path on a host that does not have
-   `wireguard-tools` installed.
-4. Move beyond “latest full view” `INCREMENTAL` events when the control-plane
-   patch model is ready.
+1. Add ACL, policy, and more granular route-distribution controls on top of the
+   current route advertisement baseline.
+2. Improve observability, upgrade flow, and long-running stability coverage for
+   the embedded runtime path.
+3. Add targeted integration coverage for rolling upgrades where older clients
+   still emit or consume legacy full-view incremental events.
 
 ## Risks
 
-1. `INCREMENTAL` events still carry the latest full peer set rather than true
-   patches.
-2. Linux data-plane reconciliation still shells out to `ip`, so it must run
+1. Linux data-plane reconciliation still shells out to `ip`, so it must run
    with root privileges in the guest and still assumes kernel WireGuard
    support.
-3. The embedded Windows path is wired up in code and packaging, but real DLLs
-   still need to be staged and validated on a Windows host or CI runner.
-4. VM lab acceptance depends on a local cloud image and SSH key being
+2. The Linux “no install” promise now applies to the guest runtime path; the
+   host-side acceptance harness may still use local `wg` helpers for key
+   generation and inspection.
+3. VM lab acceptance depends on a local cloud image and SSH key being
    configured in `tests/nat-lab/libvirt.env`.
-5. `make package-deb` requires `nfpm` or a working `go run` fallback path to
+4. `make package-deb` requires `nfpm` or a working `go run` fallback path to
    fetch `nfpm` on demand.
-6. The deb validation path assumes the guest image has a working `systemd`,
+5. The deb validation path assumes the guest image has a working `systemd`,
    `journalctl`, `dpkg`, `iproute2`, and kernel WireGuard support.
-7. Dual-NAT acceptance now fails fast on host-to-VM reachability issues; a
+6. Dual-NAT acceptance now fails fast on host-to-VM reachability issues; a
    broken libvirt/network state still requires destroy/recreate before the
    end-to-end scripts will run.
-8. `make package-windows` requires either a Windows Rust target plus linker on
+7. `make package-windows` requires either a Windows Rust target plus linker on
    the Linux host, or a prebuilt `meshlinkd.exe` supplied through
    `MESHLINK_WINDOWS_BINARY`, plus staged runtime DLLs.

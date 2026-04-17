@@ -179,8 +179,7 @@ fn run(program: &str, args: &[&str]) -> Result<std::process::Output> {
 mod wireguard_uapi {
     use std::{
         ffi::{CStr, CString},
-        io,
-        mem,
+        io, mem,
         net::IpAddr,
         os::raw::{c_char, c_int},
         ptr,
@@ -189,8 +188,7 @@ mod wireguard_uapi {
 
     use anyhow::{anyhow, bail, Context, Result};
     use libc::{
-        c_uint, in_addr, in6_addr, sockaddr, sockaddr_in, sockaddr_in6, AF_INET, AF_INET6,
-        IFNAMSIZ,
+        c_uint, in6_addr, in_addr, sockaddr, sockaddr_in, sockaddr_in6, AF_INET, AF_INET6, IFNAMSIZ,
     };
     use wg_manager::{DesiredPeer, DesiredState};
 
@@ -310,7 +308,8 @@ mod wireguard_uapi {
         let mut device = zeroed_device();
         set_device_name(&mut device.name, &desired.interface_name)?;
         device.flags = WGDEVICE_REPLACE_PEERS | WGDEVICE_HAS_PRIVATE_KEY | WGDEVICE_HAS_LISTEN_PORT;
-        device.private_key = decode_key(&desired.private_key).context("decode interface private key")?;
+        device.private_key =
+            decode_key(&desired.private_key).context("decode interface private key")?;
         device.listen_port = desired.listen_port;
         device.first_peer = peers
             .first_mut()
@@ -326,7 +325,8 @@ mod wireguard_uapi {
             return Ok(());
         }
 
-        Err(io::Error::last_os_error()).context("apply wireguard configuration through embeddable UAPI")
+        Err(io::Error::last_os_error())
+            .context("apply wireguard configuration through embeddable UAPI")
     }
 
     pub fn latest_handshake_timestamp(interface_name: &str, peer_public_key: &str) -> Result<u64> {
@@ -370,7 +370,10 @@ mod wireguard_uapi {
             bail!("interface name cannot be empty");
         }
         if raw.len() >= IFNAMSIZ {
-            bail!("interface name '{}' is too long for IFNAMSIZ", interface_name);
+            bail!(
+                "interface name '{}' is too long for IFNAMSIZ",
+                interface_name
+            );
         }
 
         for (idx, byte) in raw.iter().enumerate() {
@@ -447,8 +450,8 @@ mod wireguard_uapi {
         let prefix = prefix
             .parse::<u8>()
             .with_context(|| format!("parse prefix length '{}'", prefix))?;
-        let ip = IpAddr::from_str(address)
-            .with_context(|| format!("parse allowed IP '{}'", address))?;
+        let ip =
+            IpAddr::from_str(address).with_context(|| format!("parse allowed IP '{}'", address))?;
 
         Ok(match ip {
             IpAddr::V4(addr) => {

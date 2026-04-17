@@ -8,7 +8,8 @@
 4. 已完成：Linux 静态 WireGuard 建链、双 NAT 打洞、Relay fallback 与 direct-path recovery。
 5. 已完成：Debian/Ubuntu `amd64` 的服务端与客户端 deb 产物流，以及 VM lab 的 package-first 验证链路。
 6. 已完成：控制面内置 Hook 链、客户端静态路由发布，以及 `run-phase08-routes.sh` 路由回归脚本。
-7. 当前重点：把客户端运行时从外部 WireGuard 工具迁移到嵌入式 Linux UAPI 和 Windows embedded tunnel-service 路径，并完成真实联调。
+7. 已完成：客户端运行时从外部 WireGuard 工具迁移到嵌入式 Linux UAPI 和 Windows embedded tunnel-service 路径，并完成 dual-NAT 真实联调验收。
+8. 当前重点：推进 ACL/策略过滤，以及 embedded runtime 的观测与长期稳定性。
 
 ## Phase 0
 
@@ -37,9 +38,9 @@
 
 ## Phase 4
 
-1. 进行中：完成 Linux embedded WireGuard 控制集成，移除 `wg(8)` 运行时依赖。
-2. 进行中：完成 Windows embedded tunnel-service runtime 集成与版本钉住。
-3. 待开始：完成 Linux↔Linux、Linux↔Windows 的 embedded-runtime 回归验收。
-4. 待开始：完善 ACL、策略过滤和更细粒度的 route distribution。
-5. 待开始：完善观测、升级和长期运行稳定性。
-6. 待开始：把 `INCREMENTAL` 事件升级为真正的 patch 模型。
+1. 已完成：完成 Linux embedded WireGuard 控制集成，移除 `wg(8)` 运行时依赖。
+2. 已完成：完成 Windows embedded tunnel-service runtime 集成与版本钉住。
+3. 已完成：完成 Linux↔Linux、Linux↔Windows 的 embedded-runtime 回归验收。
+4. 已完成：把 `INCREMENTAL` 事件升级为真正的 peer patch 模型。
+5. 待开始：完善 ACL、策略过滤和更细粒度的 route distribution。
+6. 待开始：完善观测、升级和长期运行稳定性。

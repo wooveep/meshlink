@@ -12,6 +12,7 @@ mkdir -p "$MESHLINK_LAB_STATE_DIR/runtime/bin" "$MESHLINK_LAB_STATE_DIR/runtime/
 REMOTE_ROOT="/home/${MESHLINK_SSH_USER}/meshlink"
 MESHLINK_INTERFACE_NAME="${MESHLINK_INTERFACE_NAME:-sdwan0}"
 MESHLINK_SIGNAL_PORT="${MESHLINK_SIGNAL_PORT:-10000}"
+MESHLINK_RELAY_PORT="${MESHLINK_RELAY_PORT:-3478}"
 MESHLINK_STUN_PORT="${MESHLINK_STUN_PORT:-3479}"
 MESHLINK_CLIENT_A_WG_PORT="${MESHLINK_CLIENT_A_WG_PORT:-51820}"
 MESHLINK_CLIENT_B_WG_PORT="${MESHLINK_CLIENT_B_WG_PORT:-51821}"
@@ -29,6 +30,7 @@ build_artifacts() {
     cd "$ROOT_DIR/server"
     go build -o "$MESHLINK_LAB_STATE_DIR/runtime/bin/managementd" ./cmd/managementd
     go build -o "$MESHLINK_LAB_STATE_DIR/runtime/bin/signald" ./cmd/signald
+    go build -o "$MESHLINK_LAB_STATE_DIR/runtime/bin/relayd" ./cmd/relayd
   )
   cargo build --manifest-path "$ROOT_DIR/client/Cargo.toml" --bin meshlinkd >/dev/null
   cp "$ROOT_DIR/client/target/debug/meshlinkd" "$MESHLINK_LAB_STATE_DIR/runtime/bin/meshlinkd"
@@ -51,6 +53,7 @@ write_client_config() {
 node_name = "${node}"
 management_addr = "${MGMT_IP}:${MESHLINK_MANAGEMENT_PORT}"
 signal_addr = "${MGMT_IP}:${MESHLINK_SIGNAL_PORT}"
+relay_addr = "${MGMT_IP}:${MESHLINK_RELAY_PORT}"
 bootstrap_token = "meshlink-dev-token"
 public_key = "${public_key}"
 private_key = "${private_key}"
@@ -67,7 +70,8 @@ copy_runtime() {
   if [[ "$node" == "mgmt-1" ]]; then
     scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/managementd" "$node" "${REMOTE_ROOT}/bin/managementd.new"
     scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/signald" "$node" "${REMOTE_ROOT}/bin/signald.new"
-    ssh_to_vm "$node" "mv -f ${REMOTE_ROOT}/bin/managementd.new ${REMOTE_ROOT}/bin/managementd && mv -f ${REMOTE_ROOT}/bin/signald.new ${REMOTE_ROOT}/bin/signald"
+    scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/relayd" "$node" "${REMOTE_ROOT}/bin/relayd.new"
+    ssh_to_vm "$node" "mv -f ${REMOTE_ROOT}/bin/managementd.new ${REMOTE_ROOT}/bin/managementd && mv -f ${REMOTE_ROOT}/bin/signald.new ${REMOTE_ROOT}/bin/signald && mv -f ${REMOTE_ROOT}/bin/relayd.new ${REMOTE_ROOT}/bin/relayd"
     return
   fi
 
@@ -82,6 +86,10 @@ start_managementd() {
 
 start_signald() {
   ssh_to_vm mgmt-1 "sudo pkill -x signald || true; nohup ${REMOTE_ROOT}/bin/signald -listen 0.0.0.0:${MESHLINK_SIGNAL_PORT} -stun-listen 0.0.0.0:${MESHLINK_STUN_PORT} -management-addr 127.0.0.1:${MESHLINK_MANAGEMENT_PORT} > ${REMOTE_ROOT}/logs/signald.log 2>&1 < /dev/null &"
+}
+
+start_relayd() {
+  ssh_to_vm mgmt-1 "sudo pkill -x relayd || true; nohup ${REMOTE_ROOT}/bin/relayd -listen 0.0.0.0:${MESHLINK_RELAY_PORT} -management-addr 127.0.0.1:${MESHLINK_MANAGEMENT_PORT} > ${REMOTE_ROOT}/logs/relayd.log 2>&1 < /dev/null &"
 }
 
 start_client() {
@@ -221,6 +229,8 @@ start_managementd
 sleep 2
 start_signald
 sleep 2
+start_relayd
+sleep 2
 start_client client-a
 sleep 2
 start_client client-b
@@ -228,6 +238,7 @@ start_client client-b
 wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/managementd.log" "managementd listening on 0.0.0.0:${MESHLINK_MANAGEMENT_PORT}"
 wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/signald.log" "signald listening on 0.0.0.0:${MESHLINK_SIGNAL_PORT}"
 wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/signald.log" "signald STUN listening on 0.0.0.0:${MESHLINK_STUN_PORT}"
+wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/relayd.log" "relayd listening on 0.0.0.0:${MESHLINK_RELAY_PORT}"
 wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "device registered"
 wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "device registered"
 wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "received candidate announcement"
@@ -248,6 +259,7 @@ ssh_to_vm client-b "sudo ping -c 2 -W 2 ${CLIENT_A_OVERLAY} >/dev/null"
 
 collect_log mgmt-1 "${REMOTE_ROOT}/logs/managementd.log"
 collect_log mgmt-1 "${REMOTE_ROOT}/logs/signald.log"
+collect_log mgmt-1 "${REMOTE_ROOT}/logs/relayd.log"
 collect_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log"
 collect_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log"
 collect_wg_state client-a

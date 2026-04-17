@@ -135,6 +135,7 @@ systemctl status meshlink-client.service
 4. `README.txt`
 5. `tunnel.dll`
 6. `wireguard.dll`
+7. `wintun.dll`
 
 构建命令：
 
@@ -154,9 +155,21 @@ Windows 包现在还要求预先把固定版本的 runtime DLL 放到：
 deploy/packages/windows/runtime/v0.3.17/amd64/
 ```
 
-其中 `tunnel.dll` 推荐通过 `scripts/build-wireguard-windows-runtime.ps1` 在
-Windows 构建机上从 `wireguard-windows/embeddable-dll-service` 源码产出后再
-stage 进去。
+默认可以直接执行：
+
+```bash
+make windows-runtime
+```
+
+这会在 Linux 宿主机上：
+
+1. 从 `wireguard-windows` `v0.3.17` 源码交叉构建 `tunnel.dll`
+2. 从官方 `wireguard-nt` SDK 下载 `wireguard.dll`
+3. 从官方 `wintun` release 下载 `wintun.dll`
+4. 把它们和版本 manifest 一起 stage 到固定目录
+
+如果你更希望在 Windows 构建机上产出 runtime，仍然可以使用
+`scripts/build-wireguard-windows-runtime.ps1`。
 
 ## VM Lab
 
@@ -198,9 +211,12 @@ Windows 的真实验证路径位于 `tests/windows-vm/`，推荐方式是：
 3. 用 `./tests/windows-vm/create-vm.sh` 起一个额外挂到 `nat-a-lan` 或 `nat-b-lan` 的 Windows VM
 4. 用 `./tests/windows-vm/prepare-dual-nat.sh map` 补 NAT 端口映射
 5. 在 Windows 里运行包内的 `run-meshlinkd.ps1`
+6. 如果安装了 `qemu-ga`，可以用 `./tests/windows-vm/qga.sh` 从宿主机执行 PowerShell 和读取配置文件
 
-这条路径主要用于 Embedded Runtime 阶段的 Windows 对 Linux 直连、
-relay fallback 和路由吸收验证。
+这条路径现在是 Embedded Runtime 阶段的标准 Windows 验收入口，覆盖
+Windows 对 Linux 的直连、relay fallback、direct recovery、路由发布和
+路由撤销验证；脚本也会在 dual-NAT 实验室里自动避开与同侧 Linux client
+冲突的 Windows WireGuard 监听端口。
 
 如果要覆盖当前 Linux 主交付链路，推荐执行：
 

@@ -4,6 +4,8 @@ param(
     [string]$WireGuardWindowsRepo = "https://git.zx2c4.com/wireguard-windows",
     [Parameter(Mandatory = $true)]
     [string]$WireGuardDllPath,
+    [Parameter(Mandatory = $true)]
+    [string]$WintunDllPath,
     [string]$TargetArch = "amd64",
     [string]$WorkRoot = "$PSScriptRoot\..\dist\windows-runtime-src"
 )
@@ -42,7 +44,12 @@ if (-not (Test-Path $WireGuardDllPath)) {
     throw "wireguard.dll was not found at: $WireGuardDllPath"
 }
 
+if (-not (Test-Path $WintunDllPath)) {
+    throw "wintun.dll was not found at: $WintunDllPath"
+}
+
 Copy-Item -Force $tunnelDll (Join-Path $stageDir "tunnel.dll")
 Copy-Item -Force $WireGuardDllPath (Join-Path $stageDir "wireguard.dll")
+Copy-Item -Force $WintunDllPath (Join-Path $stageDir "wintun.dll")
 
 Write-Host "Staged Windows runtime assets into $stageDir"

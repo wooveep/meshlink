@@ -1,0 +1,12 @@
+runtime_version=v0.3.17
+arch=amd64
+wireguard_windows_ref=v0.3.17
+wireguard_nt_version=0.11
+wintun_version=0.13
+tunnel_dll_sha256=8a435bb93348a95a6f2d986d1220127c7c6bf852294e08993acc5b8d78e52727
+wireguard_dll_sha256=44f56e6c47307ab8855d59ca348142dccf6919d685299d0e2d62508f4574d76e
+wintun_dll_sha256=8a0581991caf829cd92b27aabcb2bab618cc8fbc887d8f86a533c95d2e3f17d4
+tunnel_dll_source=/home/cloudyi/code/meshlink/dist/windows-runtime-src/wireguard-windows-v0.3.17/embeddable-dll-service/amd64/tunnel.dll
+wireguard_dll_source=/home/cloudyi/code/meshlink/dist/windows-runtime-src/wireguard-nt-0.11/bin/amd64/wireguard.dll
+wintun_dll_source=/home/cloudyi/code/meshlink/dist/windows-runtime-src/wintun-0.13/bin/amd64/wintun.dll
+generated_at=2026-04-16T23:27:05Z

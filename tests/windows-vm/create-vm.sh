@@ -88,6 +88,8 @@ MESHLINK_WINDOWS_ISO="${MESHLINK_WINDOWS_ISO:-}"
 MESHLINK_WINDOWS_BASE_DISK="${MESHLINK_WINDOWS_BASE_DISK:-}"
 MESHLINK_WINDOWS_CLONE_MODE="${MESHLINK_WINDOWS_CLONE_MODE:-backing}"
 MESHLINK_WINDOWS_PACKAGE="${MESHLINK_WINDOWS_PACKAGE:-}"
+MESHLINK_WINDOWS_VIRTIO_ISO="${MESHLINK_WINDOWS_VIRTIO_ISO:-}"
+MESHLINK_WINDOWS_ENABLE_QEMU_AGENT="${MESHLINK_WINDOWS_ENABLE_QEMU_AGENT:-1}"
 MESHLINK_WINDOWS_STATIC_IP="${MESHLINK_WINDOWS_STATIC_IP:-$(default_static_ip)}"
 MESHLINK_WINDOWS_PREFIX="${MESHLINK_WINDOWS_PREFIX:-24}"
 MESHLINK_WINDOWS_GATEWAY="${MESHLINK_WINDOWS_GATEWAY:-$(default_gateway)}"
@@ -156,10 +158,23 @@ else
   BOOT_ARGS+=(--cdrom "$MESHLINK_WINDOWS_ISO")
 fi
 
-PACKAGE_DISK_ARGS=()
+EXTRA_DISK_ARGS=()
 if [[ -n "$MESHLINK_WINDOWS_PACKAGE" ]]; then
   ensure_iso_with_package "$MESHLINK_WINDOWS_PACKAGE" "$PACKAGE_ISO_PATH"
-  PACKAGE_DISK_ARGS+=(--disk "path=$PACKAGE_ISO_PATH,device=cdrom")
+  EXTRA_DISK_ARGS+=(--disk "path=$PACKAGE_ISO_PATH,device=cdrom")
+fi
+
+if [[ -n "$MESHLINK_WINDOWS_VIRTIO_ISO" ]]; then
+  if [[ ! -f "$MESHLINK_WINDOWS_VIRTIO_ISO" ]]; then
+    echo "virtio ISO does not exist: $MESHLINK_WINDOWS_VIRTIO_ISO" >&2
+    exit 1
+  fi
+  EXTRA_DISK_ARGS+=(--disk "path=$MESHLINK_WINDOWS_VIRTIO_ISO,device=cdrom")
+fi
+
+CHANNEL_ARGS=()
+if [[ "$MESHLINK_WINDOWS_ENABLE_QEMU_AGENT" == "1" ]]; then
+  CHANNEL_ARGS+=(--channel "unix,target.type=virtio,target.name=org.qemu.guest_agent.0")
 fi
 
 virt-install \
@@ -169,8 +184,9 @@ virt-install \
   --os-variant "$MESHLINK_WINDOWS_OS_VARIANT" \
   --disk "path=$WINDOWS_DISK_PATH,format=qcow2,bus=sata" \
   "${BOOT_ARGS[@]}" \
-  "${PACKAGE_DISK_ARGS[@]}" \
+  "${EXTRA_DISK_ARGS[@]}" \
   --network "network=$NETWORK_NAME,model=e1000e" \
+  "${CHANNEL_ARGS[@]}" \
   --graphics spice \
   --video qxl \
   --noautoconsole
@@ -190,4 +206,5 @@ Provisioning mode:
   $([[ -n "$MESHLINK_WINDOWS_BASE_DISK" ]] && printf 'clone from base disk (%s, mode=%s)\n' "$MESHLINK_WINDOWS_BASE_DISK" "$MESHLINK_WINDOWS_CLONE_MODE" || printf 'fresh install from ISO (%s)\n' "$MESHLINK_WINDOWS_ISO")
 
 If a MeshLink package was attached, it is available as a read-only CD inside the guest.
+$( [[ -n "$MESHLINK_WINDOWS_VIRTIO_ISO" ]] && printf 'If a virtio ISO was attached, install qemu-ga inside the guest and then use tests/windows-vm/qga.sh from the host.\n' )
 EOF

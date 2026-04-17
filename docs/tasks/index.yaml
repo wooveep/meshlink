@@ -331,7 +331,7 @@ tasks:
   - id: TASK-019
     title: Add the embedded Windows tunnel-service runtime path
     phase: phase-08-embedded-wireguard-runtime
-    status: in_progress
+    status: done
     priority: P0
     depends_on:
       - TASK-017
@@ -341,13 +341,13 @@ tasks:
       - client/bin/meshlinkd
       - client/crates/cli
       - client/crates/wintun-windows
-    acceptance: meshlinkd.exe supports /service mode and the Windows backend manages an embedded WireGuard tunnel service backed by package-local runtime assets
+    acceptance: meshlinkd.exe supports /service mode, the Windows backend manages an embedded WireGuard tunnel service backed by package-local runtime assets, and manual VM validation can bring the tunnel service up with the pinned package runtime set
     verification: cargo test --manifest-path client/Cargo.toml --workspace
-    updated_at: "2026-04-13T19:20:00+08:00"
+    updated_at: "2026-04-17T07:36:00+08:00"
   - id: TASK-020
     title: Pin and stage Windows runtime assets in the packaging flow
     phase: phase-08-embedded-wireguard-runtime
-    status: in_progress
+    status: done
     priority: P1
     depends_on:
       - TASK-019
@@ -355,16 +355,17 @@ tasks:
     doc: docs/tasks/phase-08-embedded-wireguard-runtime.md
     repo_paths:
       - scripts/package-windows.sh
+      - scripts/build-wireguard-windows-runtime.sh
       - scripts/build-wireguard-windows-runtime.ps1
       - deploy/packages/windows
       - README.md
-    acceptance: package-windows consumes pinned tunnel.dll and wireguard.dll inputs and the repository documents how to stage a source-built tunnel.dll
+    acceptance: package-windows consumes pinned tunnel.dll, wireguard.dll, and wintun.dll inputs, can auto-stage them on Linux, documents how to stage or build the runtime set, and the current amd64 package line has staged runtime DLLs
     verification: bash -n scripts/package-windows.sh
-    updated_at: "2026-04-13T19:20:00+08:00"
+    updated_at: "2026-04-17T07:36:00+08:00"
   - id: TASK-021
     title: Validate Linux and Windows embedded-runtime regression paths
     phase: phase-08-embedded-wireguard-runtime
-    status: pending
+    status: done
     priority: P1
     depends_on:
       - TASK-018
@@ -376,6 +377,23 @@ tasks:
       - tests/nat-lab
       - tests/windows-vm
       - docs/tasks/progress.md
-    acceptance: Linux and Windows complete direct, relay, route advertisement, and route withdrawal validation through the embedded-runtime path
-    verification: MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/nat-lab/run-phase08-routes.sh
-    updated_at: "2026-04-13T19:20:00+08:00"
+    acceptance: Linux and Windows complete direct, relay fallback, direct recovery, route advertisement, and route withdrawal validation through the embedded-runtime path, with Linux guest evidence showing no runtime dependency on wireguard-tools
+    verification: MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/windows-vm/run-phase08-validation.sh && MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/nat-lab/run-phase08-routes.sh
+    updated_at: "2026-04-17T20:45:00+08:00"
+  - id: TASK-022
+    title: Promote SyncConfig incremental updates to a true peer patch model
+    phase: phase-08-embedded-wireguard-runtime
+    status: done
+    priority: P1
+    depends_on:
+      - TASK-021
+    owner: server
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - proto/management.proto
+      - server/internal/app
+      - client/crates/agent-core
+      - docs/api/service-contracts.md
+    acceptance: FULL events carry full peer snapshots, INCREMENTAL events carry peer upserts and removals, and clients reconcile from the peer cache while remaining compatible with legacy full-view incremental payloads
+    verification: ./scripts/gen-proto.sh && cd server && go test ./... && cargo test --manifest-path client/Cargo.toml --workspace
+    updated_at: "2026-04-17T21:10:00+08:00"

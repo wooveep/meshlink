@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: proto fmt lint server client build-server build-client package-deb package-windows windows-runtime test smoke smoke-phase02 vm-lab vm-lab-phase03 vm-lab-phase03-deb vm-lab-phase08 tree
+.PHONY: proto fmt lint server client build-server build-client package-deb package-windows windows-runtime test smoke smoke-phase02 vm-lab vm-lab-phase03 vm-lab-phase03-deb vm-lab-phase08 vm-lab-phase08-windows tree
 
 proto:
 	./scripts/gen-proto.sh
@@ -30,7 +30,7 @@ package-windows:
 	./scripts/package-windows.sh
 
 windows-runtime:
-	pwsh -NoProfile -File ./scripts/build-wireguard-windows-runtime.ps1
+	./scripts/build-wireguard-windows-runtime.sh
 
 test:
 	./scripts/test-e2e.sh
@@ -52,6 +52,9 @@ vm-lab-phase03-deb:
 
 vm-lab-phase08:
 	./tests/nat-lab/run-phase08-routes.sh
+
+vm-lab-phase08-windows:
+	./tests/windows-vm/run-phase08-validation.sh
 
 tree:
 	find . -maxdepth 3 | sort

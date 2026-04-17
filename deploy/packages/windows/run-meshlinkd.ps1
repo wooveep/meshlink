@@ -12,7 +12,7 @@ if (-not (Test-Path -Path $binaryPath)) {
     throw "meshlinkd.exe was not found next to this script."
 }
 
-foreach ($runtimeAsset in @("tunnel.dll", "wireguard.dll")) {
+foreach ($runtimeAsset in @("tunnel.dll", "wireguard.dll", "wintun.dll")) {
     $runtimePath = Join-Path $PSScriptRoot $runtimeAsset
     if (-not (Test-Path -Path $runtimePath)) {
         throw "$runtimeAsset was not found next to this script."
@@ -20,6 +20,10 @@ foreach ($runtimeAsset in @("tunnel.dll", "wireguard.dll")) {
 }
 
 if (-not (Test-Path -Path $ConfigPath)) {
+    $examplePath = Join-Path $PSScriptRoot "client.example.toml"
+    if (Test-Path -Path $examplePath) {
+        throw "Config file not found: $ConfigPath. Copy client.example.toml to client.toml and update it before starting MeshLink."
+    }
     throw "Config file not found: $ConfigPath"
 }
 

@@ -47,7 +47,7 @@ Verification:
 
 ### TASK-019 Add the embedded Windows tunnel-service runtime path
 
-Status: `in_progress`
+Status: `done`
 
 Required behavior:
 
@@ -62,50 +62,64 @@ Required behavior:
 Verification:
 
 1. `cargo test --manifest-path client/Cargo.toml --workspace`
-2. Manual Windows validation with staged `tunnel.dll` and `wireguard.dll`
+2. Manual Windows validation with staged `tunnel.dll`, `wireguard.dll`, and
+   `wintun.dll`
 
 ### TASK-020 Pin and stage Windows runtime assets in the packaging flow
 
-Status: `in_progress`
+Status: `done`
 
 Required behavior:
 
 1. `scripts/package-windows.sh` requires staged `tunnel.dll` and
-   `wireguard.dll` from a fixed versioned directory or explicit env overrides.
-2. The repository documents the pinned runtime layout and the build/staging flow
-   for source-built `tunnel.dll`.
+   `wireguard.dll` and `wintun.dll` from a fixed versioned directory or
+   explicit env overrides.
+2. The repository documents the pinned runtime layout and the Linux/Windows
+   build-staging flow for the runtime DLL set.
 3. Package docs describe runtime provenance, not a preinstalled WireGuard host
    dependency.
+4. The pinned `amd64` runtime set is staged and the refreshed package now ships
+   all three DLLs.
 
 Verification:
 
 1. `bash -n scripts/package-windows.sh`
-2. `rg -n "tunnel.dll|wireguard.dll|runtime/v0.3.17" scripts deploy README.md tests/windows-vm`
+2. `rg -n "tunnel.dll|wireguard.dll|wintun.dll|runtime/v0.3.17" scripts deploy README.md tests/windows-vm`
 
 ### TASK-021 Validate Linux and Windows embedded-runtime regression paths
 
-Status: `pending`
+Status: `done`
 
 Required behavior:
 
 1. Reuse the existing dual-NAT lab to re-check Linux direct, relay fallback,
    recovery, and routed-subnet behavior without `wireguard-tools`.
 2. Re-run the Windows VM path with package-local runtime DLLs rather than a
-   preinstalled WireGuard application.
+   preinstalled WireGuard application, using `run-phase08-validation.sh` as the
+   canonical scripted acceptance entrypoint.
 3. Confirm route advertisement and route withdrawal continue to behave the same
    across Linux and Windows.
+4. Record the Linux guest/runtime distinction clearly: the guest path no longer
+   depends on `wireguard-tools`, but the host acceptance harness may still use
+   local `wg` helpers for test key generation and inspection.
 
 Verification:
 
 1. `MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/nat-lab/run-phase08-routes.sh`
-2. Manual Windows VM validation against one Linux peer for direct, relay, route
-   advertisement, and route withdrawal behavior
+2. `MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/windows-vm/run-phase08-validation.sh`
 
 ## Notes
 
 1. Linux still assumes kernel WireGuard support and root privileges; only the
    userspace `wireguard-tools` dependency is being removed.
 2. Windows now targets the official `embeddable-dll-service` integration path.
-3. Route advertisement remains control-plane driven and ACL-free in this phase;
+3. The pinned Windows runtime set now includes `wintun.dll` in addition to
+   `tunnel.dll` and `wireguard.dll`.
+4. Route advertisement remains control-plane driven and ACL-free in this phase;
    later policy work can narrow visibility without changing the client wire
    format.
+5. The Windows validation script may pick an alternate guest listen port inside
+   the dual-NAT lab to avoid same-side NAT port collisions with Linux guests.
+6. Manual Windows validation remains useful for deeper debugging, but scripted
+   acceptance now covers direct, relay fallback, recovery, route advertisement,
+   and route withdrawal.

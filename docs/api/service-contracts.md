@@ -42,8 +42,8 @@
 
 输出：
 
-1. `FULL` 事件：包含调用者自己的 `Device` 视图和当前完整 Peer 集合。
-2. `INCREMENTAL` 事件：在本阶段仍发送最新完整 Peer 集合，不使用 patch 语义。
+1. `FULL` 事件：包含调用者自己的 `Device` 视图和当前完整 Peer 集合，使用 `peers` 字段承载完整快照。
+2. `INCREMENTAL` 事件：使用 `peer_upserts` 与 `removed_peer_ids` 承载 peer patch；`peers` 不再表示完整视图。
 3. 单调递增的 `revision` 字符串，客户端可按字典序比较新旧。
 4. `Device.direct_endpoint` 与 `Peer.direct_endpoint` 在 Phase 03 可选出现，用于 Linux 静态直连；此阶段仍不传 NAT 候选。
 5. `Device.advertised_routes` 反映当前设备已经发布并通过校验的静态路由集合。
@@ -52,8 +52,8 @@
 语义约束：
 
 1. 服务端必须在设备注册视图变化后向在线客户端推送更新。
-2. `peers` 字段始终代表“当前可见 Peer 集合”，而不是局部差量。
-3. Phase 02 客户端仍可只消费发现信息；Phase 03 Linux 客户端可基于完整视图执行本地 WireGuard 接口写入。
+2. `FULL.peers` 始终代表“当前完整可见 Peer 集合”；`INCREMENTAL.peer_upserts` 只包含新增或变更的 peer，`INCREMENTAL.removed_peer_ids` 只包含被移除的 peer。
+3. 客户端必须把 `INCREMENTAL` 应用到本地 peer cache 上，再基于 cache 的收敛视图执行本地 WireGuard 接口写入。
 4. 首版 `managementd` 内置 `static_route_advertiser` Hook，不做 ACL 过滤，所有可见 peer 都接收这些静态路由。
 
 ## SignalService
