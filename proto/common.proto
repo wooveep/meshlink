@@ -24,6 +24,8 @@ message Device {
   map<string, string> labels = 7;
   DirectEndpoint direct_endpoint = 8;
   repeated string advertised_routes = 9;
+  bool disabled = 10;
+  int64 last_seen_unix = 11;
 }
 
 message Peer {

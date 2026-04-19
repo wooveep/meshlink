@@ -3,6 +3,7 @@ package ipam
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 )
@@ -63,4 +64,39 @@ func (a *Allocator) Allocate(publicKey string) (string, error) {
 	addr := net.IP(buf).String()
 	a.allocations[publicKey] = addr
 	return addr, nil
+}
+
+func (a *Allocator) Reserve(publicKey, addr string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if existing, ok := a.allocations[publicKey]; ok {
+		if existing != addr {
+			return fmt.Errorf("public key %s already reserved for %s", publicKey, existing)
+		}
+		return nil
+	}
+
+	ip := net.ParseIP(addr).To4()
+	if ip == nil {
+		return fmt.Errorf("reserve overlay address: invalid IPv4 %s", addr)
+	}
+
+	requested := binary.BigEndian.Uint32(ip)
+	if requested <= a.base || requested > a.base+a.limit {
+		return fmt.Errorf("reserve overlay address: %s outside allocator range", addr)
+	}
+
+	for existingKey, existingAddr := range a.allocations {
+		if existingKey != publicKey && existingAddr == addr {
+			return fmt.Errorf("reserve overlay address: %s already allocated", addr)
+		}
+	}
+
+	a.allocations[publicKey] = addr
+	offset := requested - a.base
+	if offset >= a.next {
+		a.next = offset + 1
+	}
+	return nil
 }

@@ -6,11 +6,16 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment="MESHLINK_MANAGEMENTD_LISTEN=:33073"
+Environment="MESHLINK_MANAGEMENTD_HTTP_LISTEN=:8080"
 Environment="MESHLINK_MANAGEMENTD_BOOTSTRAP_TOKEN=meshlink-dev-token"
+Environment="MESHLINK_MANAGEMENTD_ADMIN_TOKEN=meshlink-admin-token"
 Environment="MESHLINK_MANAGEMENTD_OVERLAY_CIDR=100.64.0.0/10"
 Environment="MESHLINK_MANAGEMENTD_SYNC_INTERVAL=15s"
+Environment="MESHLINK_MANAGEMENTD_STATE_DB=/var/lib/meshlink/management.db"
+Environment="MESHLINK_SIGNALD_STATUS_URL=http://127.0.0.1:18080/internal/status/v1/service"
+Environment="MESHLINK_RELAYD_STATUS_URL=http://127.0.0.1:18081/internal/status/v1/service"
 EnvironmentFile=-/etc/default/meshlink-managementd.env
-ExecStart=/usr/bin/managementd -listen ${MESHLINK_MANAGEMENTD_LISTEN} -bootstrap-token ${MESHLINK_MANAGEMENTD_BOOTSTRAP_TOKEN} -overlay-cidr ${MESHLINK_MANAGEMENTD_OVERLAY_CIDR} -sync-interval ${MESHLINK_MANAGEMENTD_SYNC_INTERVAL}
+ExecStart=/usr/bin/managementd -listen ${MESHLINK_MANAGEMENTD_LISTEN} -http-listen ${MESHLINK_MANAGEMENTD_HTTP_LISTEN} -bootstrap-token ${MESHLINK_MANAGEMENTD_BOOTSTRAP_TOKEN} -admin-token ${MESHLINK_MANAGEMENTD_ADMIN_TOKEN} -overlay-cidr ${MESHLINK_MANAGEMENTD_OVERLAY_CIDR} -sync-interval ${MESHLINK_MANAGEMENTD_SYNC_INTERVAL} -state-db ${MESHLINK_MANAGEMENTD_STATE_DB} -signald-status-url ${MESHLINK_SIGNALD_STATUS_URL} -relayd-status-url ${MESHLINK_RELAYD_STATUS_URL}
 Restart=always
 RestartSec=3
 

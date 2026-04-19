@@ -98,6 +98,24 @@ func TestServiceValidateHelloChecksDeviceIdentity(t *testing.T) {
 	}
 }
 
+func TestServiceValidateHelloRejectsDisabledDevice(t *testing.T) {
+	service := NewService(ServiceConfig{
+		BootstrapToken:   "meshlink-dev-token",
+		HeartbeatTimeout: 5 * time.Second,
+		DeviceLookup: &stubDeviceLookup{response: &pb.GetDeviceResponse{
+			Device: &pb.Device{Id: "dev-a", PublicKey: "pk-a", Disabled: true},
+		}},
+	})
+
+	if err := service.validateHello(context.Background(), &pb.SignalHello{
+		DeviceId:       "dev-a",
+		PublicKey:      "pk-a",
+		BootstrapToken: "meshlink-dev-token",
+	}); err == nil {
+		t.Fatal("expected disabled device to be rejected")
+	}
+}
+
 type stubDeviceLookup struct {
 	response *pb.GetDeviceResponse
 	err      error

@@ -2,6 +2,7 @@ package relay
 
 import (
 	"net"
+	"sort"
 	"sync"
 	"time"
 )
@@ -45,6 +46,25 @@ func (s *Session) AdvertiseHost() string {
 
 func (s *Session) Port() uint16 {
 	return s.port
+}
+
+func (s *Session) Members() []string {
+	members := make([]string, 0, len(s.members))
+	for member := range s.members {
+		members = append(members, member)
+	}
+	sort.Strings(members)
+	return members
+}
+
+func (s *Session) ExpiresAt() time.Time {
+	var latest time.Time
+	for _, expiresAt := range s.members {
+		if expiresAt.After(latest) {
+			latest = expiresAt
+		}
+	}
+	return latest
 }
 
 func (s *Session) reserve(deviceID string, expiresAt time.Time) {

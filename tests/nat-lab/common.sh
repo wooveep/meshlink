@@ -825,7 +825,19 @@ ensure_udp_source_port_preserving_nat() {
   local public_ip="$3"
   local source_port="$4"
 
-  ssh_to_vm "$node" "sudo iptables -t nat -C POSTROUTING -o wan0 -p udp -s ${client_ip} --sport ${source_port} -j SNAT --to-source ${public_ip}:${source_port}-${source_port} 2>/dev/null || sudo iptables -t nat -I POSTROUTING 1 -o wan0 -p udp -s ${client_ip} --sport ${source_port} -j SNAT --to-source ${public_ip}:${source_port}-${source_port}"
+  ssh_to_vm "$node" "sudo bash -lc '
+set -e
+while IFS= read -r rule; do
+  sudo iptables -t nat \${rule/-A/-D}
+done < <(sudo iptables -t nat -S POSTROUTING | grep -F -- \"-A POSTROUTING -o wan0 -p udp -m udp --sport ${source_port} -j SNAT --to-source ${public_ip}:${source_port}\" || true)
+while IFS= read -r rule; do
+  sudo iptables -t nat \${rule/-A/-D}
+done < <(sudo iptables -t nat -S POSTROUTING | grep -F -- \"-A POSTROUTING -s \" | grep -F -- \" -o wan0 -p udp -m udp --sport ${source_port} -j SNAT --to-source ${public_ip}:${source_port}\" || true)
+sudo iptables -t nat -I POSTROUTING 1 -o wan0 -p udp -s ${client_ip} --sport ${source_port} -j SNAT --to-source ${public_ip}:${source_port}-${source_port}
+if command -v conntrack >/dev/null 2>&1; then
+  sudo conntrack -D -p udp --orig-port-src ${source_port} >/dev/null 2>&1 || true
+fi
+'"
 }
 
 ensure_udp_destination_port_forward() {
@@ -833,8 +845,20 @@ ensure_udp_destination_port_forward() {
   local client_ip="$2"
   local destination_port="$3"
 
-  ssh_to_vm "$node" "sudo iptables -t nat -C PREROUTING -i wan0 -p udp --dport ${destination_port} -j DNAT --to-destination ${client_ip}:${destination_port} 2>/dev/null || sudo iptables -t nat -I PREROUTING 1 -i wan0 -p udp --dport ${destination_port} -j DNAT --to-destination ${client_ip}:${destination_port}"
-  ssh_to_vm "$node" "sudo iptables -C FORWARD -i wan0 -o lan0 -p udp -d ${client_ip} --dport ${destination_port} -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD 1 -i wan0 -o lan0 -p udp -d ${client_ip} --dport ${destination_port} -j ACCEPT"
+  ssh_to_vm "$node" "sudo bash -lc '
+set -e
+while IFS= read -r rule; do
+  sudo iptables -t nat \${rule/-A/-D}
+done < <(sudo iptables -t nat -S PREROUTING | grep -F -- \"-A PREROUTING -i wan0 -p udp -m udp --dport ${destination_port} -j DNAT --to-destination \" || true)
+while IFS= read -r rule; do
+  sudo iptables \${rule/-A/-D}
+done < <(sudo iptables -S FORWARD | grep -F -- \"-A FORWARD -d \" | grep -F -- \" -i wan0 -o lan0 -p udp -m udp --dport ${destination_port} -j ACCEPT\" || true)
+sudo iptables -t nat -I PREROUTING 1 -i wan0 -p udp --dport ${destination_port} -j DNAT --to-destination ${client_ip}:${destination_port}
+sudo iptables -I FORWARD 1 -i wan0 -o lan0 -p udp -d ${client_ip} --dport ${destination_port} -j ACCEPT
+if command -v conntrack >/dev/null 2>&1; then
+  sudo conntrack -D -p udp --dport ${destination_port} >/dev/null 2>&1 || true
+fi
+'"
 }
 
 ensure_dual_nat_wireguard_port_mapping() {

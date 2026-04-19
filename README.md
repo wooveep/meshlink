@@ -17,6 +17,7 @@ MeshLink 是一个基于 WireGuard 的分布式 SD-WAN 组网项目，目标是�
 11. 控制面内置 Hook 链与客户端静态路由发布
 12. 面向 Debian/Ubuntu `amd64` 的服务端和客户端 deb 打包链路
 13. 面向 Windows 客户端的 zip 打包脚本、嵌入式 tunnel-service 入口，以及基于 libvirt 的手工验证路径
+14. 由 `managementd` 承载的 server Web 管理台、SQLite 管理面状态源，以及 `signald` / `relayd` 的统一运行态聚合
 
 ## 仓库结构
 
@@ -53,6 +54,7 @@ MeshLink 是一个基于 WireGuard 的分布式 SD-WAN 组网项目，目标是�
 
 ```bash
 make proto
+make admin-ui
 make server
 make client
 make build-server
@@ -81,6 +83,7 @@ make lint
 7. VM lab 可覆盖 Phase 03 的静态 WireGuard 直连与 overlay ping
 8. Dual-NAT VM lab 可覆盖 Phase 05 的打洞直连与 Phase 06 的 Relay fallback/recovery
 9. 控制面可分发 peer 发布的静态 routed subnet，并通过 `AllowedIPs` 下发到对端
+10. `managementd` 现在可通过 `/admin/` 提供统一管理台，聚合 `signald` / `relayd` 运行态并维护设备元数据
 
 ## Debian Packages
 
@@ -248,7 +251,16 @@ advertised_routes = ["10.20.0.0/24"]
 
 ```bash
 cd server
-go run ./cmd/managementd -listen 127.0.0.1:33073
+go run ./cmd/managementd \
+  -listen 127.0.0.1:33073 \
+  -http-listen 127.0.0.1:8080 \
+  -state-db ./var/lib/meshlink/management.db
+```
+
+管理台：
+
+```text
+http://127.0.0.1:8080/admin/
 ```
 
 客户端：

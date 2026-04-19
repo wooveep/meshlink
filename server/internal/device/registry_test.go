@@ -8,14 +8,14 @@ import (
 func TestRegistryRegisterIdempotentByPublicKey(t *testing.T) {
 	registry := NewRegistry()
 
-	first := registry.Register(Registration{
+	first := mustRegister(t, registry, Registration{
 		Name:      "node-a",
 		PublicKey: "pk-a",
 		OS:        "linux",
 		Version:   "0.1.0",
 		OverlayIP: "100.64.0.1",
 	})
-	second := registry.Register(Registration{
+	second := mustRegister(t, registry, Registration{
 		Name:      "node-a-new",
 		PublicKey: "pk-a",
 		OS:        "linux",
@@ -37,7 +37,7 @@ func TestRegistryRegisterIdempotentByPublicKey(t *testing.T) {
 func TestRegistryPreservesDirectEndpointWhenOmitted(t *testing.T) {
 	registry := NewRegistry()
 
-	registry.Register(Registration{
+	mustRegister(t, registry, Registration{
 		Name:      "node-a",
 		PublicKey: "pk-a",
 		OverlayIP: "100.64.0.1",
@@ -47,7 +47,7 @@ func TestRegistryPreservesDirectEndpointWhenOmitted(t *testing.T) {
 		},
 	})
 
-	record := registry.Register(Registration{
+	record := mustRegister(t, registry, Registration{
 		Name:      "node-a-new",
 		PublicKey: "pk-a",
 		OverlayIP: "100.64.0.1",
@@ -66,7 +66,7 @@ func TestRegistrySubscribeNotifiesOnChanges(t *testing.T) {
 	updates, cancel := registry.Subscribe()
 	defer cancel()
 
-	registry.Register(Registration{
+	mustRegister(t, registry, Registration{
 		Name:      "node-a",
 		PublicKey: "pk-a",
 		OS:        "linux",
@@ -87,14 +87,14 @@ func TestRegistrySubscribeNotifiesOnChanges(t *testing.T) {
 func TestRegistryReplacesAdvertisedRoutesOnReregister(t *testing.T) {
 	registry := NewRegistry()
 
-	registry.Register(Registration{
+	mustRegister(t, registry, Registration{
 		Name:             "node-a",
 		PublicKey:        "pk-a",
 		OverlayIP:        "100.64.0.1",
 		AdvertisedRoutes: []string{"10.20.0.0/24"},
 	})
 
-	record := registry.Register(Registration{
+	record := mustRegister(t, registry, Registration{
 		Name:             "node-a",
 		PublicKey:        "pk-a",
 		OverlayIP:        "100.64.0.1",
@@ -108,8 +108,8 @@ func TestRegistryReplacesAdvertisedRoutesOnReregister(t *testing.T) {
 
 func TestRegistryListReturnsSortedCopies(t *testing.T) {
 	registry := NewRegistry()
-	registry.Register(Registration{Name: "node-b", PublicKey: "pk-b", OverlayIP: "100.64.0.2"})
-	registry.Register(Registration{Name: "node-a", PublicKey: "pk-a", OverlayIP: "100.64.0.1"})
+	mustRegister(t, registry, Registration{Name: "node-b", PublicKey: "pk-b", OverlayIP: "100.64.0.2"})
+	mustRegister(t, registry, Registration{Name: "node-a", PublicKey: "pk-a", OverlayIP: "100.64.0.1"})
 
 	records := registry.List()
 	if len(records) != 2 {
@@ -127,4 +127,14 @@ func TestRegistryListReturnsSortedCopies(t *testing.T) {
 	if again.Name == "mutated" {
 		t.Fatal("expected list to return copies")
 	}
+}
+
+func mustRegister(t *testing.T, registry *Registry, input Registration) *Record {
+	t.Helper()
+
+	record, err := registry.Register(input)
+	if err != nil {
+		t.Fatalf("register device: %v", err)
+	}
+	return record
 }

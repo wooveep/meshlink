@@ -9,8 +9,8 @@ end to end in the dual-NAT acceptance lab.
 ## Completed
 
 1. Local Go and protobuf toolchain enabled.
-2. `managementd` implements bootstrap-token validation, in-memory device
-   registry, overlay IPv4 allocation, and `SyncConfig` streaming.
+2. `managementd` implements bootstrap-token validation, SQLite-backed device
+   state, overlay IPv4 allocation, and `SyncConfig` streaming.
 3. `meshlinkd` implements config loading, registration, reconnect loop, and
    config stream handling.
 4. `phase01-smoke.sh` verifies the server/client control-plane loop.
@@ -93,14 +93,28 @@ end to end in the dual-NAT acceptance lab.
     `peer_upserts` and `removed_peer_ids`, while clients reconcile WireGuard
     state from their cache's converged view instead of treating incremental
     payloads as full snapshots.
+36. `managementd` now persists device state, labels, disable flags, revision,
+    and audit events in SQLite while keeping the in-memory registry for
+    `SyncConfig` fanout.
+37. `managementd` now serves `/admin/*` and `/api/admin/v1/*`, including admin
+    login, device inventory/detail editing, services/config views, and audit
+    history.
+38. `signald` and `relayd` now expose internal HTTP status contracts so the
+    management console can show live sessions, route counters, relay
+    reservations, and cleanup stats in one place.
+39. The server build and packaging flow now includes the Vue + Vite admin UI,
+    embeds the built SPA into `managementd`, and publishes the admin console
+    through the same binary.
 
 ## Next
 
 1. Add ACL, policy, and more granular route-distribution controls on top of the
    current route advertisement baseline.
-2. Improve observability, upgrade flow, and long-running stability coverage for
+2. Add stronger admin-plane hardening such as OIDC/session rotation, CSRF
+   handling, and multi-user audit attribution on top of the static-token v1.
+3. Improve observability, upgrade flow, and long-running stability coverage for
    the embedded runtime path.
-3. Add targeted integration coverage for rolling upgrades where older clients
+4. Add targeted integration coverage for rolling upgrades where older clients
    still emit or consume legacy full-view incremental events.
 
 ## Risks
@@ -123,3 +137,5 @@ end to end in the dual-NAT acceptance lab.
 7. `make package-windows` requires either a Windows Rust target plus linker on
    the Linux host, or a prebuilt `meshlinkd.exe` supplied through
    `MESHLINK_WINDOWS_BINARY`, plus staged runtime DLLs.
+8. The admin console currently relies on a static admin token and in-memory
+   browser sessions; those sessions do not survive `managementd` restarts.

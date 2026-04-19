@@ -8,4 +8,11 @@
 4. `docs/adr/` 放关键架构决策。
 5. `docs/ai/` 放 AI Agent 需要的任务边界、交付规则和上下文索引。
 
+当前与 server 管理台相关的主文档：
+
+1. `docs/architecture/system-overview.md`
+2. `docs/architecture/control-plane.md`
+3. `docs/architecture/admin-console.md`
+4. `docs/api/service-contracts.md`
+
 建议每次涉及协议、模块边界或关键流程的改动，都同步更新对应文档。

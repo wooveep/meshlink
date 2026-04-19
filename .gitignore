@@ -11,6 +11,9 @@ bin/
 dist/
 target/
 coverage/
+server/admin-ui/node_modules/
+!server/internal/adminui/dist/
+!server/internal/adminui/dist/index.html
 
 # Go
 server/.cache/

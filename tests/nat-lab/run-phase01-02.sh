@@ -48,7 +48,7 @@ copy_runtime() {
 }
 
 start_managementd() {
-  ssh_to_vm mgmt-1 "pkill -x managementd || true; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
+  ssh_to_vm mgmt-1 "pkill -x managementd || true; rm -rf \$HOME/var/lib/meshlink; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
 }
 
 start_client() {
@@ -99,7 +99,7 @@ sleep 2
 start_client client-b
 sleep 8
 
-assert_remote_log mgmt-1 "${REMOTE_ROOT}/logs/managementd.log" "managementd listening on 0.0.0.0:${MESHLINK_MANAGEMENT_PORT}"
+assert_remote_log mgmt-1 "${REMOTE_ROOT}/logs/managementd.log" "managementd gRPC listening on 0.0.0.0:${MESHLINK_MANAGEMENT_PORT}"
 assert_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "device registered"
 assert_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "device registered"
 assert_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "tracked_peers=1"

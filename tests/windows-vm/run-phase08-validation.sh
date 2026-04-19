@@ -163,7 +163,7 @@ stop_linux_client() {
 }
 
 start_managementd() {
-  ssh_to_vm mgmt-1 "sudo pkill -x managementd || true; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
+  ssh_to_vm mgmt-1 "sudo pkill -x managementd || true; rm -rf \$HOME/var/lib/meshlink; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
 }
 
 start_signald() {
@@ -225,7 +225,7 @@ ensure_linux_clients_ready() {
   start_signald
   sleep 2
   start_relayd
-  wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/managementd.log" "managementd listening on 0.0.0.0:${MESHLINK_MANAGEMENT_PORT}" 40
+  wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/managementd.log" "managementd gRPC listening on 0.0.0.0:${MESHLINK_MANAGEMENT_PORT}" 40
   wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/signald.log" "signald listening on 0.0.0.0:${MESHLINK_SIGNAL_PORT}" 40
   wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/relayd.log" "relayd listening on 0.0.0.0:${MESHLINK_RELAY_PORT}" 40
 

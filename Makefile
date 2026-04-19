@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: proto fmt lint server client build-server build-client package-deb package-windows windows-runtime test smoke smoke-phase02 vm-lab vm-lab-phase03 vm-lab-phase03-deb vm-lab-phase08 vm-lab-phase08-windows tree
+.PHONY: proto fmt lint admin-ui server client build-server build-client package-deb package-windows windows-runtime test smoke smoke-phase02 vm-lab vm-lab-phase03 vm-lab-phase03-deb vm-lab-phase08 vm-lab-phase08-windows tree
 
 proto:
 	./scripts/gen-proto.sh
@@ -10,6 +10,9 @@ fmt:
 
 lint:
 	./scripts/lint.sh
+
+admin-ui:
+	./scripts/build-admin-ui.sh
 
 server:
 	cd server && go build ./...

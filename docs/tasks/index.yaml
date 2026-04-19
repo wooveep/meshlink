@@ -397,3 +397,91 @@ tasks:
     acceptance: FULL events carry full peer snapshots, INCREMENTAL events carry peer upserts and removals, and clients reconcile from the peer cache while remaining compatible with legacy full-view incremental payloads
     verification: ./scripts/gen-proto.sh && cd server && go test ./... && cargo test --manifest-path client/Cargo.toml --workspace
     updated_at: "2026-04-17T21:10:00+08:00"
+  - id: TASK-023
+    title: Persist management state in SQLite and expose device lifecycle metadata
+    phase: phase-08-embedded-wireguard-runtime
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-022
+    owner: server
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - proto/common.proto
+      - server/internal/device
+      - server/internal/store
+      - server/internal/app
+    acceptance: managementd persists devices, labels, disabled state, last_seen, revision, and audit events in SQLite while keeping SyncConfig fanout behavior intact
+    verification: ./scripts/gen-proto.sh && cd server && go test ./...
+    updated_at: "2026-04-18T20:30:00+08:00"
+  - id: TASK-024
+    title: Add internal runtime status contracts for signald and relayd
+    phase: phase-08-embedded-wireguard-runtime
+    status: done
+    priority: P1
+    depends_on:
+      - TASK-023
+    owner: server
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - server/internal/signal
+      - server/internal/relay
+      - server/internal/observability
+      - server/cmd/signald
+      - server/cmd/relayd
+    acceptance: signald and relayd expose internal HTTP status endpoints with live session counters and disabled devices are rejected for new signal or relay activity
+    verification: cd server && go test ./...
+    updated_at: "2026-04-18T20:30:00+08:00"
+  - id: TASK-025
+    title: Add managementd admin API and browser session flow
+    phase: phase-08-embedded-wireguard-runtime
+    status: done
+    priority: P0
+    depends_on:
+      - TASK-023
+      - TASK-024
+    owner: server
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - server/internal/app
+      - server/cmd/managementd
+      - docs/api/service-contracts.md
+    acceptance: managementd serves authenticated admin APIs for overview, device management, services/config summaries, and audit history
+    verification: cd server && go test ./...
+    updated_at: "2026-04-18T20:30:00+08:00"
+  - id: TASK-026
+    title: Embed the Vue admin SPA into managementd
+    phase: phase-08-embedded-wireguard-runtime
+    status: done
+    priority: P1
+    depends_on:
+      - TASK-025
+    owner: frontend
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - server/admin-ui
+      - server/internal/adminui
+      - scripts/build-admin-ui.sh
+      - scripts/build-server.sh
+    acceptance: a Vue + Vite SPA is built into managementd and served from /admin/ with overview, devices, services, and audit views
+    verification: ./scripts/build-admin-ui.sh && ./scripts/build-server.sh
+    updated_at: "2026-04-18T20:30:00+08:00"
+  - id: TASK-027
+    title: Wire packaging and local delivery around the admin console
+    phase: phase-08-embedded-wireguard-runtime
+    status: done
+    priority: P1
+    depends_on:
+      - TASK-026
+    owner: platform
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - Makefile
+      - deploy/systemd
+      - deploy/packages/env
+      - deploy/docker-compose
+      - README.md
+      - docs/architecture
+    acceptance: build, systemd, docker-compose, and docs all describe and expose the managementd admin console entrypoint
+    verification: ./scripts/build-server.sh && cd server && go test ./...
+    updated_at: "2026-04-18T20:30:00+08:00"

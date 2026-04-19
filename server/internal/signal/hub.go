@@ -1,6 +1,7 @@
 package signal
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -14,6 +15,11 @@ type Session struct {
 
 	mu       sync.RWMutex
 	lastSeen time.Time
+}
+
+type SessionStatus struct {
+	DeviceID string    `json:"device_id"`
+	LastSeen time.Time `json:"last_seen"`
 }
 
 func NewSession(deviceID string, now time.Time) *Session {
@@ -141,4 +147,21 @@ func (h *Hub) ReapExpired(now time.Time, timeout time.Duration) []string {
 	}
 
 	return expired
+}
+
+func (h *Hub) Snapshot() []SessionStatus {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	statuses := make([]SessionStatus, 0, len(h.sessions))
+	for deviceID, session := range h.sessions {
+		statuses = append(statuses, SessionStatus{
+			DeviceID: deviceID,
+			LastSeen: session.LastSeen(),
+		})
+	}
+	sort.Slice(statuses, func(i, j int) bool {
+		return statuses[i].DeviceID < statuses[j].DeviceID
+	})
+	return statuses
 }

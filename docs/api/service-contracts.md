@@ -48,6 +48,8 @@
 4. `Device.direct_endpoint` 与 `Peer.direct_endpoint` 在 Phase 03 可选出现，用于 Linux 静态直连；此阶段仍不传 NAT 候选。
 5. `Device.advertised_routes` 反映当前设备已经发布并通过校验的静态路由集合。
 6. `Peer.allowed_ips` 现在由控制面 Hook 链生成，语义为“对端 overlay /32 + 对端已发布静态路由”。
+7. `Device.disabled=true` 表示该设备仍保留在管理面状态中，但不会再被分发到其他 peer 视图。
+8. `Device.last_seen_unix` 反映控制面最近一次持久化到该设备状态的时间戳。
 
 语义约束：
 
@@ -55,6 +57,7 @@
 2. `FULL.peers` 始终代表“当前完整可见 Peer 集合”；`INCREMENTAL.peer_upserts` 只包含新增或变更的 peer，`INCREMENTAL.removed_peer_ids` 只包含被移除的 peer。
 3. 客户端必须把 `INCREMENTAL` 应用到本地 peer cache 上，再基于 cache 的收敛视图执行本地 WireGuard 接口写入。
 4. 首版 `managementd` 内置 `static_route_advertiser` Hook，不做 ACL 过滤，所有可见 peer 都接收这些静态路由。
+5. 当设备被禁用时，服务端对该设备自身仍可返回 `Self` 视图，但 `Peers` / `peer_upserts` 中不再包含它，也不再向其他设备广播它。
 
 ## SignalService
 
@@ -82,6 +85,7 @@
 2. `CandidateAnnouncement` 与 `PunchRequest` 在 Phase 05 只承载 `LAN` 与 `PUBLIC_IPV4` candidates。
 3. `PunchResult.success=false` 只表示本次直连协商失败；Phase 06 客户端可在本地据此触发 Relay fallback。
 4. 服务端只转发消息与管理会话，不负责路径选择，也不持久化 NAT candidates。
+5. 当 `ManagementService.GetDevice` 返回 `Device.disabled=true` 时，`signald` 必须拒绝新的 `SignalHello`。
 
 ## RelayService
 
@@ -123,6 +127,34 @@
 1. `session_id` 必须匹配当前设备对的活跃 relay session。
 2. 客户端在 peer 移除、signal loop 重连、或 direct path 恢复后必须主动释放 reservation；服务端 TTL 只作为兜底清理。
 3. Relay state 不回写 `ManagementService` 的 peer 视图，路径选择仍由客户端本地维护。
+4. 当 `peer_id` 或调用方设备处于 `disabled` 状态时，`relayd` 必须拒绝新的 reservation。
+
+## Admin HTTP API
+
+由 `managementd` 提供：
+
+1. `/admin/*`
+   承载嵌入式 Vue SPA。
+2. `/api/admin/v1/session/login`
+   使用静态 `admin token` 建立会话 cookie。
+3. `/api/admin/v1/overview`
+   返回三服务状态摘要、设备总量、在线/离线统计和最近审计事件。
+4. `/api/admin/v1/devices`
+   返回设备列表；`PATCH /devices/:id` 支持修改展示名、标签和 `advertised_routes`；`POST /devices/:id/disable|enable` 控制设备启停；`DELETE /devices/:id` 删除陈旧设备。
+5. `/api/admin/v1/services`
+   返回 `managementd`、`signald`、`relayd` 的聚合运行态。
+6. `/api/admin/v1/config`
+   返回只读配置摘要，不回显敏感 token 值。
+7. `/api/admin/v1/audit`
+   返回持久化的管理动作和关键系统事件。
+
+## Internal Status Contracts
+
+1. `signald` 提供 `/internal/status/v1/service`
+   返回在线 session、最近心跳、route hit/miss 和过期清理统计。
+2. `relayd` 提供 `/internal/status/v1/service`
+   返回活跃 relay session、成员、端口、TTL 和清理统计。
+3. 这些状态契约只供 `managementd` 聚合，不直接向浏览器暴露。
 
 ## 演进规则
 

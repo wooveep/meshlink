@@ -22,6 +22,13 @@ type Manager struct {
 	sessions      map[string]*Session
 }
 
+type SessionStatus struct {
+	SessionID   string    `json:"session_id"`
+	Port        uint16    `json:"port"`
+	Members     []string  `json:"members"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
 func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.SessionTTL <= 0 {
 		cfg.SessionTTL = 30 * time.Second
@@ -107,6 +114,25 @@ func (m *Manager) ReapExpired(now time.Time) []string {
 	}
 	sort.Strings(expired)
 	return expired
+}
+
+func (m *Manager) Snapshot() []SessionStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	statuses := make([]SessionStatus, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		statuses = append(statuses, SessionStatus{
+			SessionID: session.ID(),
+			Port:      session.Port(),
+			Members:   session.Members(),
+			ExpiresAt: session.ExpiresAt(),
+		})
+	}
+	sort.Slice(statuses, func(i, j int) bool {
+		return statuses[i].SessionID < statuses[j].SessionID
+	})
+	return statuses
 }
 
 func sessionKey(left, right string) string {

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -35,6 +36,17 @@ type Service struct {
 	advertiseHost string
 	devices       DeviceLookup
 	manager       *Manager
+	reservations  atomic.Int64
+	reaped        atomic.Int64
+}
+
+type StatusSnapshot struct {
+	ActiveSessions int             `json:"active_sessions"`
+	Sessions       []SessionStatus `json:"sessions"`
+	Reservations   int64           `json:"reservations"`
+	ReapedSessions int64           `json:"reaped_sessions"`
+	SessionTTL     string          `json:"session_ttl"`
+	AdvertiseHost  string          `json:"advertise_host"`
 }
 
 func NewService(cfg ServiceConfig) (*Service, error) {
@@ -77,7 +89,8 @@ func (s *Service) RunCleanup(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			s.manager.ReapExpired(now)
+			expired := s.manager.ReapExpired(now)
+			s.reaped.Add(int64(len(expired)))
 		}
 	}
 }
@@ -104,6 +117,7 @@ func (s *Service) ReservePeerRelay(ctx context.Context, req *pb.ReservePeerRelay
 		req.GetPeerId(),
 		session.Port(),
 	)
+	s.reservations.Add(1)
 
 	return &pb.ReservePeerRelayResponse{
 		RelayHost:  session.AdvertiseHost(),
@@ -165,6 +179,9 @@ func (s *Service) validateCaller(ctx context.Context, deviceID, publicKey, boots
 	if response.GetDevice() == nil {
 		return status.Error(codes.Unauthenticated, "device lookup returned empty record")
 	}
+	if response.GetDevice().GetDisabled() {
+		return status.Error(codes.PermissionDenied, "device is disabled")
+	}
 	if response.GetDevice().GetPublicKey() != publicKey {
 		return status.Error(codes.Unauthenticated, "device public key mismatch")
 	}
@@ -183,6 +200,9 @@ func (s *Service) validatePeerExists(ctx context.Context, peerID string) error {
 	if response.GetDevice() == nil {
 		return status.Error(codes.NotFound, "peer lookup returned empty record")
 	}
+	if response.GetDevice().GetDisabled() {
+		return status.Error(codes.PermissionDenied, "peer is disabled")
+	}
 	return nil
 }
 
@@ -200,5 +220,17 @@ func ResolveAdvertiseHost(listenAddr, explicitHost string) string {
 		return "127.0.0.1"
 	default:
 		return strings.Trim(host, "[]")
+	}
+}
+
+func (s *Service) StatsSnapshot() StatusSnapshot {
+	sessions := s.manager.Snapshot()
+	return StatusSnapshot{
+		ActiveSessions: len(sessions),
+		Sessions:       sessions,
+		Reservations:   s.reservations.Load(),
+		ReapedSessions: s.reaped.Load(),
+		SessionTTL:     s.sessionTTL.String(),
+		AdvertiseHost:  s.advertiseHost,
 	}
 }

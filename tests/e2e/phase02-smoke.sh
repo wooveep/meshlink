@@ -50,7 +50,7 @@ CLIENT_B_PID=$!
 
 sleep 6
 
-grep -q "managementd listening on ${SERVER_ADDR}" "$SERVER_LOG"
+grep -q "managementd gRPC listening on ${SERVER_ADDR}" "$SERVER_LOG"
 grep -q "device registered" "$CLIENT_A_LOG"
 grep -q "device registered" "$CLIENT_B_LOG"
 grep -q "tracked_peers=1" "$CLIENT_A_LOG"

@@ -188,8 +188,9 @@ Verification:
 ## Next Focus
 
 1. Add ACL, policy, and finer-grained route-distribution controls
-2. Improve observability, upgrade flow, and long-running stability coverage
-3. Add targeted rolling-upgrade coverage around legacy full-view incremental
+2. Harden the admin plane with stronger auth/session management and richer audit attribution
+3. Improve observability, upgrade flow, and long-running stability coverage
+4. Add targeted rolling-upgrade coverage around legacy full-view incremental
    compatibility
 
 ### TASK-022 Promote `SyncConfig` incremental updates to a true peer patch model
@@ -212,3 +213,81 @@ Verification:
 1. `./scripts/gen-proto.sh`
 2. `cd server && go test ./...`
 3. `cargo test --manifest-path client/Cargo.toml --workspace`
+
+### TASK-023 Persist management state in SQLite and expose device lifecycle metadata
+
+Status: `done`
+
+Deliverables:
+
+1. `managementd` persists devices, labels, disable flags, `last_seen`, revision,
+   and audit events in SQLite
+2. The in-memory registry is rehydrated from SQLite on startup and still drives
+   `SyncConfig` subscriptions
+3. `Device.disabled` and `Device.last_seen_unix` are now part of the control-plane model
+
+Verification:
+
+1. `./scripts/gen-proto.sh`
+2. `cd server && go test ./...`
+
+### TASK-024 Add internal runtime status contracts for signald and relayd
+
+Status: `done`
+
+Deliverables:
+
+1. `signald` serves an internal HTTP status contract with active sessions,
+   recent heartbeats, route hit/miss counters, and expiration stats
+2. `relayd` serves an internal HTTP status contract with active relay sessions,
+   members, UDP ports, TTL, and reap counters
+3. Disabled devices are rejected for new signal or relay activity
+
+Verification:
+
+1. `cd server && go test ./...`
+
+### TASK-025 Add managementd admin API and browser session flow
+
+Status: `done`
+
+Deliverables:
+
+1. `/api/admin/v1/session/login` establishes an HTTP-only admin session cookie
+2. `/api/admin/v1/overview`, `/devices`, `/services`, `/config`, and `/audit`
+   provide the browser-facing management surface
+3. Device edit, enable/disable, and delete operations persist audit events
+
+Verification:
+
+1. `cd server && go test ./...`
+
+### TASK-026 Embed the Vue admin SPA into managementd
+
+Status: `done`
+
+Deliverables:
+
+1. `server/admin-ui/` contains the Vue + Vite source for the admin console
+2. `server/internal/adminui/dist/` receives the built SPA assets for embedding
+3. `managementd` serves the console at `/admin/`
+
+Verification:
+
+1. `./scripts/build-admin-ui.sh`
+2. `./scripts/build-server.sh`
+
+### TASK-027 Wire packaging and local delivery around the admin console
+
+Status: `done`
+
+Deliverables:
+
+1. `build-server`, Docker, systemd defaults, and docker-compose now include the admin console path
+2. `managementd` exposes both gRPC and HTTP listen addresses
+3. Docs and task files describe the admin console architecture and operational defaults
+
+Verification:
+
+1. `./scripts/build-server.sh`
+2. `cd server && go test ./...`

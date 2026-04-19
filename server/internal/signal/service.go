@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -33,6 +34,18 @@ type Service struct {
 	heartbeatTimeout time.Duration
 	devices          DeviceLookup
 	hub              *Hub
+	routeHits        atomic.Int64
+	routeMisses      atomic.Int64
+	expiredSessions  atomic.Int64
+}
+
+type StatusSnapshot struct {
+	ActiveSessions    int             `json:"active_sessions"`
+	Sessions          []SessionStatus `json:"sessions"`
+	RouteHits         int64           `json:"route_hits"`
+	RouteMisses       int64           `json:"route_misses"`
+	ExpiredSessions   int64           `json:"expired_sessions"`
+	HeartbeatTimeout  string          `json:"heartbeat_timeout"`
 }
 
 func NewService(cfg ServiceConfig) *Service {
@@ -62,6 +75,7 @@ func (s *Service) RunCleanup(ctx context.Context, interval time.Duration) {
 			return
 		case now := <-ticker.C:
 			expired := s.hub.ReapExpired(now, s.heartbeatTimeout)
+			s.expiredSessions.Add(int64(len(expired)))
 			for _, deviceID := range expired {
 				log.Printf("signal session expired device_id=%s timeout=%s", deviceID, s.heartbeatTimeout)
 			}
@@ -194,6 +208,9 @@ func (s *Service) validateHello(ctx context.Context, hello *pb.SignalHello) erro
 	if response.GetDevice() == nil {
 		return status.Error(codes.Unauthenticated, "device lookup returned empty record")
 	}
+	if response.GetDevice().GetDisabled() {
+		return status.Error(codes.PermissionDenied, "device is disabled")
+	}
 	if response.GetDevice().GetPublicKey() != hello.GetPublicKey() {
 		return status.Error(codes.Unauthenticated, "device public key mismatch")
 	}
@@ -239,6 +256,7 @@ func (s *Service) handleEnvelope(session *Session, envelope *pb.SignalEnvelope) 
 
 		routed := s.hub.Route(envelope.GetTargetDeviceId(), forwarded)
 		if routed {
+			s.routeHits.Add(1)
 			log.Printf(
 				"signal routed source_device_id=%s target_device_id=%s kind=%s session_id=%s",
 				session.DeviceID(),
@@ -247,6 +265,7 @@ func (s *Service) handleEnvelope(session *Session, envelope *pb.SignalEnvelope) 
 				envelope.GetSessionId(),
 			)
 		} else {
+			s.routeMisses.Add(1)
 			log.Printf(
 				"signal route missed source_device_id=%s target_device_id=%s kind=%s session_id=%s",
 				session.DeviceID(),
@@ -258,6 +277,18 @@ func (s *Service) handleEnvelope(session *Session, envelope *pb.SignalEnvelope) 
 		return nil
 	default:
 		return status.Errorf(codes.InvalidArgument, "unsupported signal kind: %s", envelope.GetKind())
+	}
+}
+
+func (s *Service) StatsSnapshot() StatusSnapshot {
+	sessions := s.hub.Snapshot()
+	return StatusSnapshot{
+		ActiveSessions:   len(sessions),
+		Sessions:         sessions,
+		RouteHits:        s.routeHits.Load(),
+		RouteMisses:      s.routeMisses.Load(),
+		ExpiredSessions:  s.expiredSessions.Load(),
+		HeartbeatTimeout: s.heartbeatTimeout.String(),
 	}
 }
 

@@ -193,3 +193,30 @@ func TestServiceReserveAndReleaseValidateDeviceIdentity(t *testing.T) {
 		t.Fatalf("expected release validation error for mismatched public key")
 	}
 }
+
+func TestServiceReserveRejectsDisabledPeer(t *testing.T) {
+	service, err := NewService(ServiceConfig{
+		BootstrapToken: "meshlink-dev-token",
+		SessionTTL:     10 * time.Second,
+		AdvertiseHost:  "198.51.100.10",
+		UDPBindHost:    "127.0.0.1",
+		DeviceLookup: &fakeDeviceLookup{
+			devices: map[string]*pb.Device{
+				"dev-a": {Id: "dev-a", PublicKey: "pk-a"},
+				"dev-b": {Id: "dev-b", PublicKey: "pk-b", Disabled: true},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	if _, err := service.ReservePeerRelay(context.Background(), &pb.ReservePeerRelayRequest{
+		DeviceId:       "dev-a",
+		PublicKey:      "pk-a",
+		BootstrapToken: "meshlink-dev-token",
+		PeerId:         "dev-b",
+	}); err == nil {
+		t.Fatal("expected disabled peer to be rejected")
+	}
+}

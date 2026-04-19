@@ -32,7 +32,7 @@ timeout 5s cargo run \
   --config "$CLIENT_CONFIG" \
   >"$CLIENT_LOG" 2>&1 || true
 
-grep -q "managementd listening on ${SERVER_ADDR}" "$SERVER_LOG"
+grep -q "managementd gRPC listening on ${SERVER_ADDR}" "$SERVER_LOG"
 grep -q "device registered" "$CLIENT_LOG"
 grep -q "received config event" "$CLIENT_LOG"
 

@@ -9,7 +9,8 @@
 5. 已完成：Debian/Ubuntu `amd64` 的服务端与客户端 deb 产物流，以及 VM lab 的 package-first 验证链路。
 6. 已完成：控制面内置 Hook 链、客户端静态路由发布，以及 `run-phase08-routes.sh` 路由回归脚本。
 7. 已完成：客户端运行时从外部 WireGuard 工具迁移到嵌入式 Linux UAPI 和 Windows embedded tunnel-service 路径，并完成 dual-NAT 真实联调验收。
-8. 当前重点：推进 ACL/策略过滤，以及 embedded runtime 的观测与长期稳定性。
+8. 已完成：`managementd` 统一 Web 管理台、SQLite 管理面状态源，以及 `signald` / `relayd` 运行态聚合。
+9. 当前重点：推进 ACL/策略过滤、admin plane hardening，以及 embedded runtime 的观测与长期稳定性。
 
 ## Phase 0
 
@@ -42,5 +43,6 @@
 2. 已完成：完成 Windows embedded tunnel-service runtime 集成与版本钉住。
 3. 已完成：完成 Linux↔Linux、Linux↔Windows 的 embedded-runtime 回归验收。
 4. 已完成：把 `INCREMENTAL` 事件升级为真正的 peer patch 模型。
-5. 待开始：完善 ACL、策略过滤和更细粒度的 route distribution。
-6. 待开始：完善观测、升级和长期运行稳定性。
+5. 已完成：补齐 server 侧 Vue 管理台、设备拓扑管理入口和三服务统一观测视图。
+6. 待开始：完善 ACL、策略过滤和更细粒度的 route distribution。
+7. 待开始：完善 admin plane 的安全模型、观测、升级和长期运行稳定性。

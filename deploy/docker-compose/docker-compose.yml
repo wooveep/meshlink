@@ -4,20 +4,32 @@ services:
   managementd:
     build:
       context: ../../server
-    command: ["managementd", "-listen", ":33073"]
+    command:
+      [
+        "managementd",
+        "-listen",
+        ":33073",
+        "-http-listen",
+        ":8080",
+        "-signald-status-url",
+        "http://signald:18080/internal/status/v1/service",
+        "-relayd-status-url",
+        "http://relayd:18081/internal/status/v1/service"
+      ]
     ports:
       - "33073:33073"
+      - "8080:8080"
 
   signald:
     build:
       context: ../../server
-    command: ["signald", "-listen", ":10000"]
+    command: ["signald", "-listen", ":10000", "-status-listen", ":18080"]
     ports:
       - "10000:10000"
 
   relayd:
     build:
       context: ../../server
-    command: ["relayd", "-listen", ":3478"]
+    command: ["relayd", "-listen", ":3478", "-status-listen", ":18081"]
     ports:
       - "3478:3478/udp"

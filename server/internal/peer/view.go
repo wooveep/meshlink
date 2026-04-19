@@ -11,13 +11,16 @@ import (
 // BuildVisiblePeers returns the complete visible peer set for a device.
 func BuildVisiblePeers(selfID string, records []*device.Record, hooks ...AllowedIPsHook) []*pb.Peer {
 	self := findRecord(selfID, records)
+	if self != nil && self.Disabled {
+		return nil
+	}
 	if len(hooks) == 0 {
 		hooks = DefaultAllowedIPsHooks()
 	}
 
 	peers := make([]*pb.Peer, 0, len(records))
 	for _, record := range records {
-		if record.ID == selfID {
+		if record.ID == selfID || record.Disabled {
 			continue
 		}
 

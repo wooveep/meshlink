@@ -6,6 +6,8 @@ OUT_DIR="$ROOT_DIR/dist/bin/linux-amd64/server"
 
 mkdir -p "$OUT_DIR"
 
+"$ROOT_DIR/scripts/build-admin-ui.sh"
+
 build() {
   local name="$1"
   echo "Building $name for linux/amd64"

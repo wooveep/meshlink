@@ -174,7 +174,7 @@ copy_configs() {
 
 reset_remote_state() {
   local node="$1"
-  ssh_to_vm "$node" "sudo systemctl stop meshlink-managementd meshlink-client 2>/dev/null || true; sudo systemctl reset-failed meshlink-managementd meshlink-client 2>/dev/null || true"
+  ssh_to_vm "$node" "sudo systemctl stop meshlink-managementd meshlink-client 2>/dev/null || true; sudo systemctl reset-failed meshlink-managementd meshlink-client 2>/dev/null || true; if [ '$node' = 'mgmt-1' ]; then sudo rm -f /var/lib/meshlink/management.db; fi"
 }
 
 install_management_packages() {
@@ -284,7 +284,7 @@ assert_remote_command mgmt-1 "sudo systemctl status meshlink-managementd --no-pa
 assert_remote_command client-a "sudo systemctl status meshlink-client --no-pager >/dev/null"
 assert_remote_command client-b "sudo systemctl status meshlink-client --no-pager >/dev/null"
 
-assert_remote_journal mgmt-1 "meshlink-managementd" "managementd listening on 0.0.0.0:${MESHLINK_MANAGEMENT_PORT}"
+assert_remote_journal mgmt-1 "meshlink-managementd" "managementd gRPC listening on 0.0.0.0:${MESHLINK_MANAGEMENT_PORT}"
 assert_remote_journal client-a "meshlink-client" "device registered"
 assert_remote_journal client-b "meshlink-client" "device registered"
 assert_remote_journal client-a "meshlink-client" "wireguard state reconciled"

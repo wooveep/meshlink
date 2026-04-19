@@ -15,6 +15,7 @@ import (
 	"meshlink/server/internal/device"
 	"meshlink/server/internal/ipam"
 	"meshlink/server/internal/peer"
+	"meshlink/server/internal/store"
 	"meshlink/server/pkg/pb"
 )
 
@@ -22,6 +23,8 @@ type ManagementConfig struct {
 	BootstrapToken string
 	OverlayCIDR    string
 	SyncInterval   time.Duration
+	StateStore     device.Backend
+	AuditStore     *store.SQLiteStore
 }
 
 type ManagementService struct {
@@ -33,6 +36,7 @@ type ManagementService struct {
 	overlayNet   *net.IPNet
 	peerHooks    []peer.AllowedIPsHook
 	syncInterval time.Duration
+	auditStore   *store.SQLiteStore
 }
 
 func NewManagementService(cfg ManagementConfig) (*ManagementService, error) {
@@ -45,13 +49,29 @@ func NewManagementService(cfg ManagementConfig) (*ManagementService, error) {
 		return nil, fmt.Errorf("parse overlay CIDR: %w", err)
 	}
 
+	registry, err := device.NewRegistryWithBackend(context.Background(), cfg.StateStore)
+	if err != nil {
+		return nil, fmt.Errorf("new device registry: %w", err)
+	}
+	for _, record := range registry.List() {
+		if record.Disabled {
+			continue
+		}
+		if record.OverlayIP != "" {
+			if err := allocator.Reserve(record.PublicKey, record.OverlayIP); err != nil {
+				return nil, fmt.Errorf("rehydrate overlay allocation for %s: %w", record.ID, err)
+			}
+		}
+	}
+
 	return &ManagementService{
 		auth:         auth.NewTokenValidator(cfg.BootstrapToken),
-		registry:     device.NewRegistry(),
+		registry:     registry,
 		allocator:    allocator,
 		overlayNet:   overlayNet,
 		peerHooks:    peer.DefaultAllowedIPsHooks(),
 		syncInterval: cfg.SyncInterval,
+		auditStore:   cfg.AuditStore,
 	}, nil
 }
 
@@ -86,7 +106,7 @@ func (s *ManagementService) RegisterDevice(ctx context.Context, req *pb.Register
 		return nil, status.Error(codes.ResourceExhausted, err.Error())
 	}
 
-	record := s.registry.Register(device.Registration{
+	record, err := s.registry.Register(device.Registration{
 		Name:             req.GetName(),
 		PublicKey:        req.GetPublicKey(),
 		OS:               req.GetOs(),
@@ -95,6 +115,9 @@ func (s *ManagementService) RegisterDevice(ctx context.Context, req *pb.Register
 		DirectEndpoint:   fromPBDirectEndpoint(req.GetDirectEndpoint()),
 		AdvertisedRoutes: advertisedRoutes,
 	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "persist device registration: %v", err)
+	}
 
 	return &pb.RegisterDeviceResponse{
 		Device: toPBDevice(record),
@@ -231,7 +254,20 @@ func (s *ManagementService) GetDevice(ctx context.Context, req *pb.GetDeviceRequ
 	return &pb.GetDeviceResponse{Device: toPBDevice(record)}, nil
 }
 
+func (s *ManagementService) Registry() *device.Registry {
+	return s.registry
+}
+
+func (s *ManagementService) AuditStore() *store.SQLiteStore {
+	return s.auditStore
+}
+
 func toPBDevice(record *device.Record) *pb.Device {
+	labels := record.Labels
+	if labels == nil {
+		labels = map[string]string{}
+	}
+
 	return &pb.Device{
 		Id:        record.ID,
 		Name:      record.Name,
@@ -241,9 +277,11 @@ func toPBDevice(record *device.Record) *pb.Device {
 		Overlay: &pb.OverlayAddress{
 			Ipv4: record.OverlayIP,
 		},
-		Labels:           map[string]string{},
+		Labels:           labels,
 		DirectEndpoint:   toPBDirectEndpoint(record.DirectEndpoint),
 		AdvertisedRoutes: append([]string(nil), record.AdvertisedRoutes...),
+		Disabled:         record.Disabled,
+		LastSeenUnix:     record.LastSeen.Unix(),
 	}
 }
 
