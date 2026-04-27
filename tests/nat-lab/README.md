@@ -10,7 +10,7 @@
 ## 前提
 
 1. 宿主机已安装 `virsh`、`virt-install`、`qemu-img`、`ssh`、`scp`
-2. libvirt `default` network 与目标 storage pool 处于 active
+2. libvirt `default` network 处于 active，且 `/var/lib/libvirt/images` 可写
 3. 已准备 Linux cloud image
 4. 本机存在可注入到 VM 的 SSH 公钥，或在环境文件里显式设置
 5. 新建 VM 时会通过 cloud-init 安装 WireGuard、ping、router 所需工具，并为实验用户授予免密 sudo
@@ -22,9 +22,13 @@
 3. 按阶段选择拓扑：
    `MESHLINK_LAB_TOPOLOGY=flat` 用于 Phase 01-04 和轻量 Phase 05 回归
    `MESHLINK_LAB_TOPOLOGY=dual-nat` 用于 Phase 05/06 主验收
-4. 如需自定义网络、pool、SSH 用户或静态 IP，也在该文件里修改
+4. 如需自定义网络、镜像目录、storage pool 回退、SSH 用户或静态 IP，也在该文件里修改
 
 切换拓扑后建议先执行 `./tests/nat-lab/destroy-lab.sh` 再重建，确保静态网络与 cloud-init 配置一致。
+
+默认情况下，实验室 VM 的 qcow2 overlay 会创建在 `/var/lib/libvirt/images`。
+如果你仍然希望跟随 libvirt storage pool，可在环境文件里改用
+`MESHLINK_LIBVIRT_POOL=<pool-name>`。
 
 ## 拓扑
 

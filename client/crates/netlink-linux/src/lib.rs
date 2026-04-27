@@ -1,7 +1,11 @@
 use std::{collections::BTreeSet, path::Path, process::Command};
 
 use anyhow::{bail, Context, Result};
-use wg_manager::{DesiredState, WireGuardBackend};
+use wg_manager::{DesiredState, Endpoint, WireGuardBackend};
+
+mod public_udp_proxy;
+
+pub use public_udp_proxy::{ObservedRemoteEndpoint, ProxyPeerHandle, PublicUdpProxy};
 
 const IP_BIN_PRIMARY: &str = "/usr/sbin/ip";
 
@@ -22,6 +26,10 @@ impl WireGuardBackend for LinuxWireGuardBackend {
 
 pub fn latest_handshake_timestamp(interface_name: &str, peer_public_key: &str) -> Result<u64> {
     latest_handshake_linux(interface_name, peer_public_key)
+}
+
+pub fn peer_endpoint(interface_name: &str, peer_public_key: &str) -> Result<Option<Endpoint>> {
+    peer_endpoint_linux(interface_name, peer_public_key)
 }
 
 #[cfg(target_os = "linux")]
@@ -53,9 +61,19 @@ fn latest_handshake_linux(interface_name: &str, peer_public_key: &str) -> Result
     wireguard_uapi::latest_handshake_timestamp(interface_name, peer_public_key)
 }
 
+#[cfg(target_os = "linux")]
+fn peer_endpoint_linux(interface_name: &str, peer_public_key: &str) -> Result<Option<Endpoint>> {
+    wireguard_uapi::peer_endpoint(interface_name, peer_public_key)
+}
+
 #[cfg(not(target_os = "linux"))]
 fn latest_handshake_linux(_interface_name: &str, _peer_public_key: &str) -> Result<u64> {
     Ok(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peer_endpoint_linux(_interface_name: &str, _peer_public_key: &str) -> Result<Option<Endpoint>> {
+    Ok(None)
 }
 
 fn ensure_interface(ip_bin: &str, interface_name: &str) -> Result<()> {
@@ -190,7 +208,7 @@ mod wireguard_uapi {
     use libc::{
         c_uint, in6_addr, in_addr, sockaddr, sockaddr_in, sockaddr_in6, AF_INET, AF_INET6, IFNAMSIZ,
     };
-    use wg_manager::{DesiredPeer, DesiredState};
+    use wg_manager::{DesiredPeer, DesiredState, Endpoint};
 
     const WG_KEY_LEN: usize = 32;
     const WG_KEY_B64_LEN: usize = 45;
@@ -330,21 +348,10 @@ mod wireguard_uapi {
     }
 
     pub fn latest_handshake_timestamp(interface_name: &str, peer_public_key: &str) -> Result<u64> {
-        let interface_name = CString::new(interface_name).context("encode interface name")?;
-        let mut device_ptr = ptr::null_mut::<wg_device>();
-        let rc = unsafe { wg_get_device(&mut device_ptr, interface_name.as_ptr()) };
-        if rc != 0 {
-            let err = io::Error::last_os_error();
-            return match err.raw_os_error() {
-                Some(libc::ENODEV) | Some(libc::ENOENT) => Ok(0),
-                _ => Err(err).context("read wireguard device state through embeddable UAPI"),
-            };
-        }
-        if device_ptr.is_null() {
-            return Ok(0);
-        }
-
-        let device = DeviceGuard(device_ptr);
+        let device = match load_device(interface_name)? {
+            Some(device) => device,
+            None => return Ok(0),
+        };
         let mut peer = unsafe { (*device.0).first_peer };
         while !peer.is_null() {
             if encode_key(unsafe { &(*peer).public_key })? == peer_public_key {
@@ -356,12 +363,46 @@ mod wireguard_uapi {
         Ok(0)
     }
 
+    pub fn peer_endpoint(interface_name: &str, peer_public_key: &str) -> Result<Option<Endpoint>> {
+        let device = match load_device(interface_name)? {
+            Some(device) => device,
+            None => return Ok(None),
+        };
+        let mut peer = unsafe { (*device.0).first_peer };
+        while !peer.is_null() {
+            if encode_key(unsafe { &(*peer).public_key })? == peer_public_key {
+                return endpoint_from_peer(unsafe { &(*peer) });
+            }
+            peer = unsafe { (*peer).next_peer };
+        }
+
+        Ok(None)
+    }
+
     fn zeroed_peer() -> wg_peer {
         unsafe { mem::zeroed() }
     }
 
     fn zeroed_device() -> wg_device {
         unsafe { mem::zeroed() }
+    }
+
+    fn load_device(interface_name: &str) -> Result<Option<DeviceGuard>> {
+        let interface_name = CString::new(interface_name).context("encode interface name")?;
+        let mut device_ptr = ptr::null_mut::<wg_device>();
+        let rc = unsafe { wg_get_device(&mut device_ptr, interface_name.as_ptr()) };
+        if rc != 0 {
+            let err = io::Error::last_os_error();
+            return match err.raw_os_error() {
+                Some(libc::ENODEV) | Some(libc::ENOENT) => Ok(None),
+                _ => Err(err).context("read wireguard device state through embeddable UAPI"),
+            };
+        }
+        if device_ptr.is_null() {
+            return Ok(None);
+        }
+
+        Ok(Some(DeviceGuard(device_ptr)))
     }
 
     fn set_device_name(dst: &mut [c_char; IFNAMSIZ], interface_name: &str) -> Result<()> {
@@ -432,6 +473,34 @@ mod wireguard_uapi {
                 },
             },
         })
+    }
+
+    fn endpoint_from_peer(peer: &wg_peer) -> Result<Option<Endpoint>> {
+        let family = unsafe { peer.endpoint.addr.sa_family as i32 };
+        match family {
+            AF_INET => {
+                let addr = unsafe { peer.endpoint.addr4 };
+                if addr.sin_port == 0 {
+                    return Ok(None);
+                }
+                Ok(Some(Endpoint {
+                    host: IpAddr::V4(std::net::Ipv4Addr::from(addr.sin_addr.s_addr.to_ne_bytes()))
+                        .to_string(),
+                    port: u16::from_be(addr.sin_port),
+                }))
+            }
+            AF_INET6 => {
+                let addr = unsafe { peer.endpoint.addr6 };
+                if addr.sin6_port == 0 {
+                    return Ok(None);
+                }
+                Ok(Some(Endpoint {
+                    host: IpAddr::V6(std::net::Ipv6Addr::from(addr.sin6_addr.s6_addr)).to_string(),
+                    port: u16::from_be(addr.sin6_port),
+                }))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn build_allowedips(allowed_ips: &[String]) -> Result<Vec<Box<wg_allowedip>>> {

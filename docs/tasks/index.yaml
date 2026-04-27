@@ -1,5 +1,5 @@
 version: 1
-updated_at: "2026-04-13T19:20:00+08:00"
+updated_at: "2026-04-20T12:20:00+08:00"
 tasks:
   - id: TASK-000
     title: Bootstrap Go and Protobuf toolchain
@@ -165,10 +165,11 @@ tasks:
       - client/crates/stun
       - client/crates/holepunch
       - client/crates/agent-core
+      - docs/tasks/phase-05-dual-nat-root-cause.md
       - tests/nat-lab
     acceptance: Two Linux clients can exchange candidates over SignalService, override peer endpoints at runtime, and establish a dynamic direct path without recreating the WireGuard interface on the dual-NAT lab
     verification: cd server && go test ./... && cargo test --manifest-path client/Cargo.toml --workspace && MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/nat-lab/run-phase05.sh
-    updated_at: "2026-04-11T21:30:00+08:00"
+    updated_at: "2026-04-20T12:20:00+08:00"
   - id: TASK-010
     title: Relay fallback and direct-path recovery on dual-NAT
     phase: phase-06-relay-fallback

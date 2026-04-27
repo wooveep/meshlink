@@ -1,30 +1,39 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     process::{Command, Stdio},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::{bail, Context, Result};
 use api_client::proto::{
     signal_envelope::Body, signal_service_client::SignalServiceClient, Candidate,
-    CandidateAnnouncement, CandidateType, Heartbeat, PunchRequest, PunchResult, SignalEnvelope,
-    SignalHello, SignalKind,
+    CandidateAnnouncement, CandidateType, Heartbeat, PathType, PunchRequest, PunchResult,
+    SignalEnvelope, SignalHello, SignalKind,
 };
 use holepunch::{
     candidate_path_type, select_remote_candidate_for_local, should_initiate, sort_candidates,
 };
-use netlink_linux::latest_handshake_timestamp;
+#[cfg(windows)]
+use netlink_linux::ObservedRemoteEndpoint;
+#[cfg(not(windows))]
+use netlink_linux::{
+    latest_handshake_timestamp, peer_endpoint as current_peer_endpoint, ObservedRemoteEndpoint,
+};
 use relay_client::{release_peer_relay, reserve_peer_relay, RelayReservation};
 use serde::Deserialize;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, watch, Mutex},
     task::JoinHandle,
     time::{interval, sleep},
 };
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tracing::{info, warn};
 use wg_manager::Endpoint;
+#[cfg(windows)]
+use wintun_windows::{latest_handshake_timestamp, peer_endpoint as current_peer_endpoint};
 
+use crate::punch_socket::PunchSocket;
 use crate::{api_client_endpoint, AgentConfig, CachedPeer, PeerSnapshot};
 
 #[derive(Debug, Clone)]
@@ -46,6 +55,8 @@ impl SignalRuntime {
         config: AgentConfig,
         device_id: String,
         initial_candidates: Vec<Candidate>,
+        initial_punch_socket: Option<PunchSocket>,
+        observed_rx: Option<mpsc::Receiver<ObservedRemoteEndpoint>>,
     ) -> Option<Self> {
         let signal_addr = config.signal_addr.clone()?;
         let (snapshot_tx, snapshot_rx) = watch::channel(PeerSnapshot::default());
@@ -59,6 +70,8 @@ impl SignalRuntime {
                 snapshot_rx,
                 update_tx,
                 initial_candidates,
+                initial_punch_socket,
+                observed_rx,
             )
             .await;
         });
@@ -90,6 +103,9 @@ struct PeerSignalState {
     remote_candidates: Vec<Candidate>,
     request_received: bool,
     attempt: Option<PunchAttempt>,
+    last_selected_candidate: Option<Candidate>,
+    last_observed_remote_candidate: Option<Candidate>,
+    last_reported_observed_remote_candidate: Option<Candidate>,
     relay: Option<ActiveRelay>,
     next_direct_retry_at: Option<Instant>,
 }
@@ -99,12 +115,20 @@ struct PunchAttempt {
     selected_candidate: Candidate,
     started_at: Instant,
     baseline_handshake: u64,
+    last_reassert_at: Instant,
 }
 
 #[derive(Debug, Clone)]
 struct ActiveRelay {
     reservation: RelayReservation,
     next_refresh_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteFailureDisposition {
+    Ignore,
+    PromoteDirect,
+    FallbackToRelay,
 }
 
 impl ActiveRelay {
@@ -139,20 +163,32 @@ async fn run_signal_loop(
     snapshot_rx: watch::Receiver<PeerSnapshot>,
     update_tx: mpsc::Sender<SignalUpdate>,
     mut cached_candidates: Vec<Candidate>,
+    initial_punch_socket: Option<PunchSocket>,
+    mut observed_rx: Option<mpsc::Receiver<ObservedRemoteEndpoint>>,
 ) {
+    let punch_socket = match open_punch_socket(&config, initial_punch_socket).await {
+        Ok(socket) => socket,
+        Err(err) => {
+            warn!("unable to start punch socket runtime: {err:#}");
+            return;
+        }
+    };
     let mut first_connect = true;
     loop {
         if !first_connect || cached_candidates.is_empty() {
-            cached_candidates = refresh_local_candidates(&config, &cached_candidates).await;
+            cached_candidates =
+                refresh_local_candidates(&config, &punch_socket, &cached_candidates).await;
         }
         first_connect = false;
         match connect_and_run(
             &config,
             &device_id,
             &signal_addr,
+            punch_socket.clone(),
             snapshot_rx.clone(),
             update_tx.clone(),
             cached_candidates.clone(),
+            &mut observed_rx,
         )
         .await
         {
@@ -172,9 +208,11 @@ async fn connect_and_run(
     config: &AgentConfig,
     device_id: &str,
     signal_addr: &str,
+    punch_socket: Arc<Mutex<PunchSocket>>,
     mut snapshot_rx: watch::Receiver<PeerSnapshot>,
     update_tx: mpsc::Sender<SignalUpdate>,
-    local_candidates: Vec<Candidate>,
+    mut local_candidates: Vec<Candidate>,
+    observed_rx: &mut Option<mpsc::Receiver<ObservedRemoteEndpoint>>,
 ) -> Result<()> {
     let endpoint = api_client_endpoint(signal_addr);
     let mut client = SignalServiceClient::connect(endpoint)
@@ -208,6 +246,10 @@ async fn connect_and_run(
     let mut heartbeat_tick = interval(Duration::from_secs(5));
     let mut punch_tick = interval(Duration::from_millis(500));
     let mut relay_tick = interval(Duration::from_secs(1));
+    announce_tick.tick().await;
+    heartbeat_tick.tick().await;
+    punch_tick.tick().await;
+    relay_tick.tick().await;
     let mut peer_states = BTreeMap::<String, PeerSignalState>::new();
 
     let initial_snapshot = snapshot_rx.borrow().clone();
@@ -246,6 +288,8 @@ async fn connect_and_run(
                     }).await.context("send signal heartbeat")?;
                 }
                 _ = announce_tick.tick() => {
+                    local_candidates =
+                        refresh_local_candidates(config, &punch_socket, &local_candidates).await;
                     let snapshot = snapshot_rx.borrow().clone();
                     announce_candidates(&outbound_tx, device_id, &snapshot, &local_candidates).await?;
                     maybe_send_punch_requests(&outbound_tx, device_id, &snapshot, &local_candidates, &peer_states).await?;
@@ -282,11 +326,25 @@ async fn connect_and_run(
                         config,
                         device_id,
                         &snapshot,
-                        &local_candidates,
+                        &mut local_candidates,
                         envelope,
                         &outbound_tx,
                         &mut peer_states,
                         &update_tx,
+                    ).await?;
+                }
+                observed = recv_observed_endpoint(observed_rx) => {
+                    let Some(observed) = observed else {
+                        continue;
+                    };
+                    let snapshot = snapshot_rx.borrow().clone();
+                    handle_observed_remote_endpoint(
+                        device_id,
+                        &snapshot,
+                        &mut peer_states,
+                        &update_tx,
+                        &outbound_tx,
+                        observed,
                     ).await?;
                 }
             }
@@ -299,14 +357,58 @@ async fn connect_and_run(
 }
 
 pub async fn bootstrap_local_candidates(config: &AgentConfig) -> Vec<Candidate> {
-    refresh_local_candidates(config, &[]).await
+    let mut candidates = baseline_local_candidates(config);
+    if let Some(stun_addr) = config.resolved_stun_addr() {
+        let mapping = match config.listen_port {
+            Some(listen_port) => {
+                stun::query_with_local_port(&stun_addr, Duration::from_secs(2), listen_port).await
+            }
+            None => stun::query(&stun_addr, Duration::from_secs(2)).await,
+        };
+        match mapping {
+            Ok(mapping) => candidates.push(Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: mapping.address,
+                port: u32::from(mapping.port),
+                network_interface: "stun".to_string(),
+                priority: 100,
+            }),
+            Err(err) => warn!("bootstrap stun query failed: {err:#}"),
+        }
+    }
+
+    dedupe_candidates(sort_candidates(candidates))
+}
+
+pub async fn bootstrap_local_candidates_with_socket(
+    config: &AgentConfig,
+    punch_socket: &mut PunchSocket,
+) -> Vec<Candidate> {
+    let mut candidates = baseline_local_candidates(config);
+    if let Some(stun_addr) = config.resolved_stun_addr() {
+        match punch_socket
+            .query_stun(&stun_addr, Duration::from_secs(2))
+            .await
+        {
+            Ok(mapping) => candidates.push(Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: mapping.address,
+                port: u32::from(mapping.port),
+                network_interface: "punch-socket-stun".to_string(),
+                priority: 100,
+            }),
+            Err(err) => warn!("bootstrap stun query on provided socket failed: {err:#}"),
+        }
+    }
+
+    dedupe_candidates(sort_candidates(candidates))
 }
 
 async fn handle_incoming_envelope(
     config: &AgentConfig,
     device_id: &str,
     snapshot: &PeerSnapshot,
-    local_candidates: &[Candidate],
+    local_candidates: &mut Vec<Candidate>,
     envelope: SignalEnvelope,
     outbound_tx: &mpsc::Sender<SignalEnvelope>,
     peer_states: &mut BTreeMap<String, PeerSignalState>,
@@ -356,17 +458,70 @@ async fn handle_incoming_envelope(
         }
         Some(Body::PunchResult(body)) => {
             info!(peer_id = %peer.peer_id, success = body.success, "received punch result");
-            if !body.success {
-                state.attempt = None;
-                fallback_to_relay(
-                    config,
-                    device_id,
-                    peer,
-                    state,
-                    update_tx,
-                    "remote_punch_failed",
-                )
-                .await?;
+            let observed_candidate = body.observed_candidate.clone();
+            if let Some(candidate) = observed_candidate {
+                if update_local_observed_candidate(local_candidates, &candidate) {
+                    state.last_observed_remote_candidate = Some(candidate.clone());
+                    info!(
+                        peer_id = %peer.peer_id,
+                        endpoint = %render_candidate_endpoint(&candidate),
+                        "updated local public candidate from peer observed source endpoint"
+                    );
+                    announce_candidates(outbound_tx, device_id, snapshot, local_candidates).await?;
+                }
+            }
+            if body.success {
+                if let Some(candidate) = candidate_for_remote_direct_progress(state) {
+                    update_tx
+                        .send(SignalUpdate {
+                            peer_id: peer.peer_id.clone(),
+                            endpoint_override: candidate_to_endpoint(&candidate),
+                            probe_overlay_ipv4: Some(peer.overlay_ipv4.clone()),
+                            reason: "remote_direct_progress".to_string(),
+                        })
+                        .await
+                        .context("apply remote direct progress")?;
+                }
+            } else if body.observed_candidate.is_none() {
+                let latest =
+                    latest_handshake(&config.interface_name, &peer.public_key).unwrap_or_default();
+                match remote_failure_disposition(state, latest) {
+                    RemoteFailureDisposition::Ignore => {
+                        info!(
+                            peer_id = %peer.peer_id,
+                            "ignoring remote punch failure without active local attempt"
+                        );
+                    }
+                    RemoteFailureDisposition::PromoteDirect => {
+                        info!(
+                            peer_id = %peer.peer_id,
+                            latest_handshake = latest,
+                            "ignoring remote punch failure because direct handshake is already observed locally"
+                        );
+                        complete_direct_attempt(
+                            config,
+                            device_id,
+                            peer,
+                            state,
+                            outbound_tx,
+                            update_tx,
+                            "remote_failure_after_local_handshake",
+                        )
+                        .await?;
+                    }
+                    RemoteFailureDisposition::FallbackToRelay => {
+                        state.attempt = None;
+                        fallback_to_relay(
+                            config,
+                            device_id,
+                            peer,
+                            state,
+                            update_tx,
+                            "remote_punch_failed",
+                        )
+                        .await?;
+                    }
+                }
             }
         }
         Some(Body::Heartbeat(_)) | Some(Body::Hello(_)) | None => {}
@@ -456,6 +611,9 @@ async fn maybe_send_punch_requests(
             continue;
         };
         if !should_initiate(device_id, &peer.peer_id) || state.remote_candidates.is_empty() {
+            continue;
+        }
+        if state.attempt.is_some() {
             continue;
         }
         if !relay_retry_due(state) {
@@ -549,10 +707,12 @@ async fn start_attempt_for_peer(
     let baseline = latest_handshake(&config.interface_name, &peer.public_key).unwrap_or_default();
 
     state.attempt = Some(PunchAttempt {
-        selected_candidate: candidate,
+        selected_candidate: candidate.clone(),
         started_at: Instant::now(),
         baseline_handshake: baseline,
+        last_reassert_at: Instant::now(),
     });
+    state.last_selected_candidate = Some(candidate);
     info!(
         peer_id = %peer.peer_id,
         endpoint = %endpoint.render(),
@@ -588,36 +748,57 @@ async fn check_attempts(
 
         let latest = latest_handshake(&config.interface_name, &peer.public_key).unwrap_or_default();
         if latest > attempt.baseline_handshake && latest > 0 {
-            info!(peer_id = %peer.peer_id, "hole punch handshake observed");
-            outbound_tx
-                .send(SignalEnvelope {
-                    kind: SignalKind::PunchResult as i32,
-                    source_device_id: device_id.to_string(),
-                    target_device_id: peer.peer_id.clone(),
-                    session_id: session_id(device_id, &peer.peer_id),
-                    body: Some(Body::PunchResult(PunchResult {
-                        success: true,
-                        selected_candidate: Some(attempt.selected_candidate.clone()),
-                        path_type: candidate_path_type(&attempt.selected_candidate) as i32,
-                        reason: "handshake_observed".to_string(),
-                    })),
+            complete_direct_attempt(
+                config,
+                device_id,
+                peer,
+                state,
+                outbound_tx,
+                update_tx,
+                "handshake_observed",
+            )
+            .await?;
+            continue;
+        }
+
+        if let Some(observed_candidate) =
+            observed_remote_candidate(config, peer, &attempt.selected_candidate)?
+        {
+            apply_observed_remote_candidate(
+                device_id,
+                peer,
+                state,
+                update_tx,
+                outbound_tx,
+                observed_candidate,
+                "wireguard_runtime_observed_candidate",
+            )
+            .await?;
+            continue;
+        }
+
+        if attempt.last_reassert_at.elapsed() >= Duration::from_secs(2) {
+            update_tx
+                .send(SignalUpdate {
+                    peer_id: peer.peer_id.clone(),
+                    endpoint_override: None,
+                    probe_overlay_ipv4: None,
+                    reason: "punch_rearm_clear".to_string(),
                 })
                 .await
-                .context("send punch success")?;
-            state.attempt = None;
-            if let Some(active_relay) = state.relay.take() {
-                info!(peer_id = %peer.peer_id, "direct path recovered; releasing relay");
-                release_active_relay(
-                    config,
-                    device_id,
-                    &peer.peer_id,
-                    active_relay,
-                    "direct_recovered",
-                )
-                .await;
+                .context("clear active punch endpoint override before reassert")?;
+            update_tx
+                .send(SignalUpdate {
+                    peer_id: peer.peer_id.clone(),
+                    endpoint_override: candidate_to_endpoint(&attempt.selected_candidate),
+                    probe_overlay_ipv4: Some(peer.overlay_ipv4.clone()),
+                    reason: "punch_rearm_set".to_string(),
+                })
+                .await
+                .context("reassert active punch endpoint override")?;
+            if let Some(active_attempt) = state.attempt.as_mut() {
+                active_attempt.last_reassert_at = Instant::now();
             }
-            state.next_direct_retry_at = None;
-            continue;
         }
 
         probe_overlay_peer(&peer.overlay_ipv4);
@@ -635,6 +816,7 @@ async fn check_attempts(
                         selected_candidate: Some(attempt.selected_candidate.clone()),
                         path_type: candidate_path_type(&attempt.selected_candidate) as i32,
                         reason: "timeout".to_string(),
+                        observed_candidate: None,
                     })),
                 })
                 .await
@@ -643,6 +825,168 @@ async fn check_attempts(
             fallback_to_relay(config, device_id, peer, state, update_tx, "punch_timeout").await?;
         }
     }
+    Ok(())
+}
+
+async fn handle_observed_remote_endpoint(
+    device_id: &str,
+    snapshot: &PeerSnapshot,
+    peer_states: &mut BTreeMap<String, PeerSignalState>,
+    update_tx: &mpsc::Sender<SignalUpdate>,
+    outbound_tx: &mpsc::Sender<SignalEnvelope>,
+    observed: ObservedRemoteEndpoint,
+) -> Result<()> {
+    let Some(peer) = snapshot
+        .peers
+        .iter()
+        .find(|peer| peer.peer_id == observed.peer_id)
+    else {
+        return Ok(());
+    };
+    let Some(state) = peer_states.get_mut(&observed.peer_id) else {
+        return Ok(());
+    };
+    let Some(attempt) = state.attempt.as_ref() else {
+        return Ok(());
+    };
+
+    let observed_candidate = Candidate {
+        r#type: attempt.selected_candidate.r#type,
+        address: observed.endpoint.host,
+        port: u32::from(observed.endpoint.port),
+        network_interface: "observed".to_string(),
+        priority: attempt.selected_candidate.priority.saturating_add(50),
+    };
+    apply_observed_remote_candidate(
+        device_id,
+        peer,
+        state,
+        update_tx,
+        outbound_tx,
+        observed_candidate,
+        "proxy_observed_remote_candidate",
+    )
+    .await
+}
+
+async fn apply_observed_remote_candidate(
+    device_id: &str,
+    peer: &CachedPeer,
+    state: &mut PeerSignalState,
+    update_tx: &mpsc::Sender<SignalUpdate>,
+    outbound_tx: &mpsc::Sender<SignalEnvelope>,
+    observed_candidate: Candidate,
+    reason: &str,
+) -> Result<()> {
+    let changed =
+        update_remote_observed_candidate(&mut state.remote_candidates, &observed_candidate);
+    let should_report = state
+        .last_reported_observed_remote_candidate
+        .as_ref()
+        .map(|candidate| candidate != &observed_candidate)
+        .unwrap_or(true);
+
+    state.last_observed_remote_candidate = Some(observed_candidate.clone());
+    state.last_selected_candidate = Some(observed_candidate.clone());
+    if let Some(active_attempt) = state.attempt.as_mut() {
+        active_attempt.selected_candidate = observed_candidate.clone();
+    }
+
+    info!(
+        peer_id = %peer.peer_id,
+        changed,
+        endpoint = %render_candidate_endpoint(&observed_candidate),
+        reason,
+        "observed remote source endpoint"
+    );
+
+    if changed {
+        update_tx
+            .send(SignalUpdate {
+                peer_id: peer.peer_id.clone(),
+                endpoint_override: candidate_to_endpoint(&observed_candidate),
+                probe_overlay_ipv4: Some(peer.overlay_ipv4.clone()),
+                reason: "observed_remote_candidate".to_string(),
+            })
+            .await
+            .context("apply observed remote candidate")?;
+    }
+
+    if should_report {
+        state.last_reported_observed_remote_candidate = Some(observed_candidate.clone());
+        outbound_tx
+            .send(SignalEnvelope {
+                kind: SignalKind::PunchResult as i32,
+                source_device_id: device_id.to_string(),
+                target_device_id: peer.peer_id.clone(),
+                session_id: session_id(device_id, &peer.peer_id),
+                body: Some(Body::PunchResult(PunchResult {
+                    success: false,
+                    selected_candidate: Some(observed_candidate.clone()),
+                    path_type: PathType::HolepunchedIpv4 as i32,
+                    reason: reason.to_string(),
+                    observed_candidate: Some(observed_candidate),
+                })),
+            })
+            .await
+            .context("send observed remote candidate")?;
+    }
+
+    Ok(())
+}
+
+async fn complete_direct_attempt(
+    config: &AgentConfig,
+    device_id: &str,
+    peer: &CachedPeer,
+    state: &mut PeerSignalState,
+    outbound_tx: &mpsc::Sender<SignalEnvelope>,
+    update_tx: &mpsc::Sender<SignalUpdate>,
+    reason: &str,
+) -> Result<()> {
+    let Some(attempt) = state.attempt.clone() else {
+        return Ok(());
+    };
+
+    info!(peer_id = %peer.peer_id, reason, "hole punch handshake observed");
+    outbound_tx
+        .send(SignalEnvelope {
+            kind: SignalKind::PunchResult as i32,
+            source_device_id: device_id.to_string(),
+            target_device_id: peer.peer_id.clone(),
+            session_id: session_id(device_id, &peer.peer_id),
+            body: Some(Body::PunchResult(PunchResult {
+                success: true,
+                selected_candidate: Some(attempt.selected_candidate.clone()),
+                path_type: candidate_path_type(&attempt.selected_candidate) as i32,
+                reason: reason.to_string(),
+                observed_candidate: state.last_observed_remote_candidate.clone(),
+            })),
+        })
+        .await
+        .context("send punch success")?;
+    state.attempt = None;
+    if let Some(active_relay) = state.relay.take() {
+        info!(peer_id = %peer.peer_id, "direct path recovered; releasing relay");
+        release_active_relay(
+            config,
+            device_id,
+            &peer.peer_id,
+            active_relay,
+            "direct_recovered",
+        )
+        .await;
+    }
+    update_tx
+        .send(SignalUpdate {
+            peer_id: peer.peer_id.clone(),
+            endpoint_override: candidate_to_endpoint(&attempt.selected_candidate),
+            probe_overlay_ipv4: Some(peer.overlay_ipv4.clone()),
+            reason: "direct_path_confirmed".to_string(),
+        })
+        .await
+        .context("apply direct endpoint after local handshake")?;
+    state.next_direct_retry_at = Some(Instant::now() + direct_retry_delay(config.punch_timeout));
     Ok(())
 }
 
@@ -803,15 +1147,110 @@ async fn release_active_relay(
 
 async fn refresh_local_candidates(
     config: &AgentConfig,
+    punch_socket: &Arc<Mutex<PunchSocket>>,
     cached_candidates: &[Candidate],
 ) -> Vec<Candidate> {
-    let mut candidates = Vec::new();
-    let listen_port = u32::from(config.listen_port.unwrap_or_default());
-    if listen_port == 0 {
-        return candidates;
+    let mut candidates = baseline_local_candidates(config);
+
+    if let Some(stun_addr) = config.resolved_stun_addr() {
+        let (state, mapping) = {
+            let mut punch_socket = punch_socket.lock().await;
+            let state = punch_socket.state();
+            if state.shared_receive_runtime {
+                (state, None)
+            } else {
+                (
+                    state,
+                    Some(
+                        punch_socket
+                            .query_stun(&stun_addr, Duration::from_secs(2))
+                            .await,
+                    ),
+                )
+            }
+        };
+        match mapping {
+            None => {
+                let cached_socket_candidates = cached_candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.r#type == CandidateType::PublicIpv4 as i32
+                            && candidate.network_interface == "punch-socket-stun"
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !cached_socket_candidates.is_empty() {
+                    candidates.extend(cached_socket_candidates);
+                }
+            }
+            Some(Ok(mapping)) if state.port_aligned => candidates.push(Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: mapping.address,
+                port: u32::from(mapping.port),
+                network_interface: "punch-socket-stun".to_string(),
+                priority: 50,
+            }),
+            Some(Ok(mapping)) => {
+                info!(
+                    endpoint = %Endpoint {
+                        host: mapping.address,
+                        port: mapping.port,
+                    }.render(),
+                    "ignoring non-aligned punch socket mapping for advertised candidates"
+                );
+            }
+            Some(Err(err)) => {
+                if !state.port_aligned {
+                    warn!("stun query failed on non-aligned punch socket: {err:#}");
+                } else {
+                    let cached_socket_candidates = cached_candidates
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.r#type == CandidateType::PublicIpv4 as i32
+                                && candidate.network_interface == "punch-socket-stun"
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+
+                    if cached_socket_candidates.is_empty() {
+                        warn!("stun query failed: {err:#}");
+                    } else {
+                        info!(
+                            candidates = cached_socket_candidates.len(),
+                            "reusing cached stun candidates after query failure"
+                        );
+                        candidates.extend(cached_socket_candidates);
+                    }
+                }
+            }
+        }
     }
 
+    candidates.extend(
+        cached_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.r#type == CandidateType::PublicIpv4 as i32
+                    && (candidate.network_interface == "stun"
+                        || candidate.network_interface == "observed")
+            })
+            .cloned(),
+    );
+
+    dedupe_candidates(sort_candidates(candidates))
+}
+
+fn baseline_local_candidates(config: &AgentConfig) -> Vec<Candidate> {
+    let listen_port = u32::from(config.listen_port.unwrap_or_default());
+    if listen_port == 0 {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
     for (address, interface_name) in collect_lan_ipv4s().unwrap_or_default() {
+        if interface_name == config.interface_name {
+            continue;
+        }
         candidates.push(Candidate {
             r#type: CandidateType::Lan as i32,
             address,
@@ -831,56 +1270,188 @@ async fn refresh_local_candidates(
         });
     }
 
-    if let Some(stun_addr) = config.resolved_stun_addr() {
-        let mapping = match config.listen_port {
-            Some(listen_port) => {
-                stun::query_with_local_port(&stun_addr, Duration::from_secs(2), listen_port).await
-            }
-            None => stun::query(&stun_addr, Duration::from_secs(2)).await,
-        };
-        match mapping {
-            Ok(mapping) => candidates.push(Candidate {
-                r#type: CandidateType::PublicIpv4 as i32,
-                address: mapping.address,
-                port: u32::from(mapping.port),
-                network_interface: "stun".to_string(),
-                priority: 100,
-            }),
-            Err(err) => {
-                let cached_stun_candidates = cached_candidates
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.r#type == CandidateType::PublicIpv4 as i32
-                            && candidate.network_interface == "stun"
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
+    candidates
+}
 
-                if cached_stun_candidates.is_empty() {
-                    warn!("stun query failed: {err:#}");
-                } else {
-                    info!(
-                        candidates = cached_stun_candidates.len(),
-                        "reusing cached stun candidates after query failure"
-                    );
-                    candidates.extend(cached_stun_candidates);
-                }
+async fn open_punch_socket(
+    config: &AgentConfig,
+    initial_punch_socket: Option<PunchSocket>,
+) -> Result<Arc<Mutex<PunchSocket>>> {
+    let punch_socket = match initial_punch_socket {
+        Some(punch_socket) => punch_socket,
+        None => {
+            #[cfg(windows)]
+            {
+                PunchSocket::bind_with_requested_port(None, config.listen_port).await?
+            }
+            #[cfg(not(windows))]
+            {
+                PunchSocket::bind(config.listen_port).await?
             }
         }
+    };
+    let state = punch_socket.state();
+    info!(
+        requested_port = state.requested_port.unwrap_or_default(),
+        bound_addr = %state.local_addr,
+        port_aligned = state.port_aligned,
+        "punch socket runtime ready"
+    );
+    Ok(Arc::new(Mutex::new(punch_socket)))
+}
+
+async fn recv_observed_endpoint(
+    observed_rx: &mut Option<mpsc::Receiver<ObservedRemoteEndpoint>>,
+) -> Option<ObservedRemoteEndpoint> {
+    match observed_rx.as_mut() {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn candidate_to_endpoint(candidate: &Candidate) -> Option<Endpoint> {
+    u16::try_from(candidate.port).ok().map(|port| Endpoint {
+        host: candidate.address.clone(),
+        port,
+    })
+}
+
+fn update_remote_observed_candidate(
+    remote_candidates: &mut Vec<Candidate>,
+    observed: &Candidate,
+) -> bool {
+    let mut changed = false;
+    remote_candidates.retain(|candidate| {
+        let replace_candidate = candidate.r#type == observed.r#type
+            && (candidate.address == observed.address
+                || candidate.network_interface == "stun"
+                || candidate.network_interface == "static"
+                || candidate.network_interface == "punch-socket-stun"
+                || candidate.network_interface == "observed");
+        if replace_candidate {
+            changed = true;
+            return false;
+        }
+        true
+    });
+    remote_candidates.push(observed.clone());
+    *remote_candidates = dedupe_candidates(sort_candidates(std::mem::take(remote_candidates)));
+    changed
+        || remote_candidates
+            .iter()
+            .any(|candidate| candidate == observed)
+}
+
+fn observed_remote_candidate(
+    config: &AgentConfig,
+    peer: &CachedPeer,
+    selected_candidate: &Candidate,
+) -> Result<Option<Candidate>> {
+    let Some(endpoint) = current_peer_endpoint(&config.interface_name, &peer.public_key)? else {
+        return Ok(None);
+    };
+
+    let is_same_public_ip = matches!(
+        CandidateType::try_from(selected_candidate.r#type).ok(),
+        Some(CandidateType::PublicIpv4 | CandidateType::PublicIpv6)
+    ) && endpoint.host == selected_candidate.address
+        && endpoint.port != selected_candidate.port as u16;
+
+    if !is_same_public_ip {
+        return Ok(None);
     }
 
-    dedupe_candidates(sort_candidates(candidates))
+    Ok(Some(Candidate {
+        r#type: selected_candidate.r#type,
+        address: endpoint.host,
+        port: u32::from(endpoint.port),
+        network_interface: "observed".to_string(),
+        priority: selected_candidate.priority.saturating_add(50),
+    }))
+}
+
+fn update_local_observed_candidate(
+    local_candidates: &mut Vec<Candidate>,
+    observed: &Candidate,
+) -> bool {
+    let Some(observed_type) = CandidateType::try_from(observed.r#type).ok() else {
+        return false;
+    };
+    if !matches!(
+        observed_type,
+        CandidateType::PublicIpv4 | CandidateType::PublicIpv6
+    ) {
+        return false;
+    }
+
+    let mut changed = false;
+    local_candidates.retain(|candidate| {
+        let same_public_family = candidate.r#type == observed.r#type;
+        let replace_candidate = same_public_family
+            && (candidate.address == observed.address
+                || candidate.network_interface == "punch-socket-stun"
+                || candidate.network_interface == "punch-socket-observed"
+                || candidate.network_interface == "observed"
+                || candidate.network_interface == "static");
+        if replace_candidate {
+            changed = true;
+            return false;
+        }
+        true
+    });
+
+    local_candidates.push(observed.clone());
+    *local_candidates = dedupe_candidates(sort_candidates(std::mem::take(local_candidates)));
+    changed
+        || local_candidates
+            .iter()
+            .any(|candidate| candidate == observed)
+}
+
+fn render_candidate_endpoint(candidate: &Candidate) -> String {
+    let port = u16::try_from(candidate.port).unwrap_or_default();
+    Endpoint {
+        host: candidate.address.clone(),
+        port,
+    }
+    .render()
 }
 
 fn relay_retry_due(state: &PeerSignalState) -> bool {
-    match (state.relay.is_some(), state.next_direct_retry_at) {
-        (true, Some(next_retry_at)) => Instant::now() >= next_retry_at,
-        _ => true,
+    match state.next_direct_retry_at {
+        Some(next_retry_at) => Instant::now() >= next_retry_at,
+        None => true,
+    }
+}
+
+fn remote_failure_disposition(
+    state: &PeerSignalState,
+    latest_handshake: u64,
+) -> RemoteFailureDisposition {
+    match state.attempt.as_ref() {
+        None => RemoteFailureDisposition::Ignore,
+        Some(attempt) if latest_handshake > attempt.baseline_handshake && latest_handshake > 0 => {
+            RemoteFailureDisposition::PromoteDirect
+        }
+        Some(_) => RemoteFailureDisposition::FallbackToRelay,
     }
 }
 
 fn direct_retry_delay(punch_timeout: Duration) -> Duration {
     Duration::from_secs((punch_timeout.as_secs().max(3) * 3).max(10))
+}
+
+fn candidate_for_remote_direct_progress(state: &PeerSignalState) -> Option<Candidate> {
+    state
+        .last_observed_remote_candidate
+        .clone()
+        .or_else(|| {
+            state
+                .attempt
+                .as_ref()
+                .map(|attempt| attempt.selected_candidate.clone())
+        })
+        .or_else(|| state.last_selected_candidate.clone())
 }
 
 fn dedupe_candidates(candidates: Vec<Candidate>) -> Vec<Candidate> {
@@ -894,8 +1465,7 @@ fn dedupe_candidates(candidates: Vec<Candidate>) -> Vec<Candidate> {
                 deduped.push(candidate);
             }
             Some(index)
-                if candidate.network_interface == "stun"
-                    && deduped[index].network_interface != "stun" =>
+                if candidate_source_rank(&candidate) > candidate_source_rank(&deduped[index]) =>
             {
                 deduped[index] = candidate;
             }
@@ -903,6 +1473,15 @@ fn dedupe_candidates(candidates: Vec<Candidate>) -> Vec<Candidate> {
         }
     }
     deduped
+}
+
+fn candidate_source_rank(candidate: &Candidate) -> u8 {
+    match candidate.network_interface.as_str() {
+        "observed" => 3,
+        "stun" => 2,
+        "punch-socket-stun" => 1,
+        _ => 0,
+    }
 }
 
 fn collect_lan_ipv4s() -> Result<Vec<(String, String)>> {
@@ -1056,14 +1635,21 @@ fn probe_overlay_peer(overlay_ipv4: &str) {
         return;
     }
 
-    let ping_bin = if std::path::Path::new("/usr/bin/ping").exists() {
+    let ping_bin = if cfg!(windows) {
+        "ping"
+    } else if std::path::Path::new("/usr/bin/ping").exists() {
         "/usr/bin/ping"
     } else {
         "ping"
     };
 
+    #[cfg(windows)]
+    let args = ["-n", "5", "-w", "1000", overlay_ipv4];
+    #[cfg(not(windows))]
+    let args = ["-c", "5", "-i", "0.2", "-W", "1", overlay_ipv4];
+
     let _ = Command::new(ping_bin)
-        .args(["-c", "1", "-W", "1", overlay_ipv4])
+        .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -1072,12 +1658,13 @@ fn probe_overlay_peer(overlay_ipv4: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        dedupe_candidates, direct_retry_delay, parse_ip_addr_output, parse_windows_interface_json,
-        relay_host, relay_refresh_delay,
+        candidate_for_remote_direct_progress, dedupe_candidates, direct_retry_delay,
+        parse_ip_addr_output, parse_windows_interface_json, relay_host, relay_refresh_delay,
+        remote_failure_disposition, PeerSignalState, PunchAttempt, RemoteFailureDisposition,
     };
     use api_client::proto::{Candidate, CandidateType};
     use relay_client::RelayReservation;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn parse_ip_addr_output_extracts_global_ipv4_addresses() {
@@ -1155,7 +1742,7 @@ mod tests {
     }
 
     #[test]
-    fn dedupe_candidates_prefers_stun_candidate_for_same_public_endpoint() {
+    fn dedupe_candidates_prefers_punch_socket_stun_over_static_for_same_public_endpoint() {
         let deduped = dedupe_candidates(vec![
             Candidate {
                 r#type: CandidateType::PublicIpv4 as i32,
@@ -1168,12 +1755,132 @@ mod tests {
                 r#type: CandidateType::PublicIpv4 as i32,
                 address: "198.51.100.10".to_string(),
                 port: 51820,
-                network_interface: "stun".to_string(),
+                network_interface: "punch-socket-stun".to_string(),
                 priority: 100,
             },
         ]);
 
         assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].network_interface, "punch-socket-stun");
+    }
+
+    #[test]
+    fn dedupe_candidates_keeps_bootstrap_stun_over_punch_socket_stun() {
+        let deduped = dedupe_candidates(vec![
+            Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: "198.51.100.10".to_string(),
+                port: 51820,
+                network_interface: "stun".to_string(),
+                priority: 100,
+            },
+            Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: "198.51.100.10".to_string(),
+                port: 51820,
+                network_interface: "punch-socket-stun".to_string(),
+                priority: 50,
+            },
+        ]);
+
+        assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].network_interface, "stun");
+    }
+
+    #[test]
+    fn remote_failure_is_ignored_once_attempt_is_already_cleared() {
+        let state = PeerSignalState::default();
+
+        assert_eq!(
+            remote_failure_disposition(&state, 0),
+            RemoteFailureDisposition::Ignore
+        );
+    }
+
+    #[test]
+    fn remote_failure_promotes_direct_when_handshake_advanced() {
+        let mut state = PeerSignalState::default();
+        state.attempt = Some(PunchAttempt {
+            selected_candidate: Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: "198.51.100.10".to_string(),
+                port: 51820,
+                network_interface: "stun".to_string(),
+                priority: 100,
+            },
+            started_at: Instant::now(),
+            baseline_handshake: 10,
+            last_reassert_at: Instant::now(),
+        });
+
+        assert_eq!(
+            remote_failure_disposition(&state, 11),
+            RemoteFailureDisposition::PromoteDirect
+        );
+    }
+
+    #[test]
+    fn remote_failure_falls_back_while_attempt_is_still_pending() {
+        let mut state = PeerSignalState::default();
+        state.attempt = Some(PunchAttempt {
+            selected_candidate: Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: "198.51.100.10".to_string(),
+                port: 51820,
+                network_interface: "stun".to_string(),
+                priority: 100,
+            },
+            started_at: Instant::now(),
+            baseline_handshake: 10,
+            last_reassert_at: Instant::now(),
+        });
+
+        assert_eq!(
+            remote_failure_disposition(&state, 10),
+            RemoteFailureDisposition::FallbackToRelay
+        );
+    }
+
+    #[test]
+    fn remote_direct_progress_keeps_local_remote_candidate_mapping() {
+        let expected = Candidate {
+            r#type: CandidateType::PublicIpv4 as i32,
+            address: "192.0.2.10".to_string(),
+            port: 51820,
+            network_interface: "stun".to_string(),
+            priority: 100,
+        };
+
+        let state = PeerSignalState {
+            last_selected_candidate: Some(expected.clone()),
+            ..PeerSignalState::default()
+        };
+
+        assert_eq!(candidate_for_remote_direct_progress(&state), Some(expected));
+    }
+
+    #[test]
+    fn remote_direct_progress_prefers_observed_candidate() {
+        let observed = Candidate {
+            r#type: CandidateType::PublicIpv4 as i32,
+            address: "198.51.100.30".to_string(),
+            port: 55000,
+            network_interface: "observed".to_string(),
+            priority: 150,
+        };
+
+        let state = PeerSignalState {
+            last_selected_candidate: Some(Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: "192.0.2.10".to_string(),
+                port: 51820,
+                network_interface: "stun".to_string(),
+                priority: 100,
+            }),
+            last_observed_remote_candidate: Some(observed.clone()),
+            ..PeerSignalState::default()
+        };
+
+        assert_eq!(candidate_for_remote_direct_progress(&state), Some(observed));
     }
 }

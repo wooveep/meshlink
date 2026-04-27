@@ -14,5 +14,6 @@
 2. `docs/architecture/control-plane.md`
 3. `docs/architecture/admin-console.md`
 4. `docs/api/service-contracts.md`
+5. `docs/operations/deployment-management-usage.md`
 
 建议每次涉及协议、模块边界或关键流程的改动，都同步更新对应文档。

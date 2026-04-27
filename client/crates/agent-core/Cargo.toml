@@ -7,8 +7,10 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 api-client = { path = "../api-client" }
+base64 = "0.22"
 holepunch = { path = "../holepunch" }
 netlink-linux = { path = "../netlink-linux" }
+rand_core = { version = "0.6", features = ["getrandom"] }
 relay-client = { path = "../relay-client" }
 serde.workspace = true
 serde_json.workspace = true
@@ -20,3 +22,7 @@ tonic.workspace = true
 tracing.workspace = true
 wg-manager = { path = "../wg-manager" }
 wintun-windows = { path = "../wintun-windows" }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[dev-dependencies]
+tempfile.workspace = true

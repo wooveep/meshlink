@@ -83,9 +83,11 @@
 
 1. `SignalEnvelope.session_id` 用于串联同一 peer 协商过程。
 2. `CandidateAnnouncement` 与 `PunchRequest` 在 Phase 05 只承载 `LAN` 与 `PUBLIC_IPV4` candidates。
-3. `PunchResult.success=false` 只表示本次直连协商失败；Phase 06 客户端可在本地据此触发 Relay fallback。
-4. 服务端只转发消息与管理会话，不负责路径选择，也不持久化 NAT candidates。
-5. 当 `ManagementService.GetDevice` 返回 `Device.disabled=true` 时，`signald` 必须拒绝新的 `SignalHello`。
+3. `PunchResult.observed_candidate` 为可选字段，用于把 peer 在直连探测时实际观察到的源 `ip:port` 回传给对端；该字段可以修正此前仅由 STUN 推导出的 provisional public candidate。
+4. `PunchResult.success=false` 只表示本次直连协商未确认成功；当 `observed_candidate` 存在时，客户端应先吸收该修正候选再决定是否进入 Relay fallback。
+5. `PunchResult.selected_candidate` 表示发送方在本轮打洞里选中的“目标 peer candidate”。接收方不得把该字段直接当作自己的远端运行时 endpoint 覆盖值；对接收方来说，它通常描述的是“对端眼里的我方候选”，不是“我应该继续发送到的对端地址”。
+6. 服务端只转发消息与管理会话，不负责路径选择，也不持久化 NAT candidates。
+7. 当 `ManagementService.GetDevice` 返回 `Device.disabled=true` 时，`signald` 必须拒绝新的 `SignalHello`。
 
 ## RelayService
 

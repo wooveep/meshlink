@@ -133,12 +133,13 @@ systemctl status meshlink-client.service
 当前仓库可输出 Windows 客户端 zip 包到 `dist/windows/`，包内包含：
 
 1. `meshlinkd.exe`
-2. `client.toml`
+2. `client.example.toml`
 3. `run-meshlinkd.ps1`
 4. `README.txt`
 5. `tunnel.dll`
 6. `wireguard.dll`
 7. `wintun.dll`
+8. 首次启动后自动生成的 `client.state.json`
 
 构建命令：
 
@@ -184,7 +185,7 @@ make windows-runtime
 4. `nat-a`
 5. `nat-b`
 
-使用前先复制 `tests/nat-lab/libvirt.env.example` 为 `tests/nat-lab/libvirt.env`，填入本机 cloud image 路径，然后执行：
+使用前先复制 `tests/nat-lab/libvirt.env.example` 为 `tests/nat-lab/libvirt.env`，填入本机 cloud image 路径。实验室 VM 磁盘默认存放在 `/var/lib/libvirt/images`，然后执行：
 
 ```bash
 ./tests/nat-lab/create-lab.sh
@@ -269,6 +270,8 @@ http://127.0.0.1:8080/admin/
 cargo run --manifest-path client/Cargo.toml --bin meshlinkd -- \
   --config deploy/examples/client-config.toml
 ```
+
+当前默认客户端配置只要求填写 `management_addr`。首次启动会在配置文件同目录自动生成 `*.state.json`，保存 `private_key` / `public_key`，并按同一 host 自动推导 `signal` / `relay` / `stun` 地址。
 
 安装包方式运行客户端：
 

@@ -1,13 +1,18 @@
-node_name = "replace-me"
 management_addr = "127.0.0.1:33073"
+
+# Optional overrides:
+# node_name = "my-node"
 # signal_addr = "127.0.0.1:10000"
 # relay_addr = "127.0.0.1:3478"
 # stun_addr = "127.0.0.1:3479"
-bootstrap_token = "meshlink-dev-token"
-public_key = "replace-me"
-interface_name = "sdwan0"
-log_level = "info"
+# bootstrap_token = "meshlink-dev-token"
+# interface_name = "sdwan0"
+# log_level = "info"
 # punch_timeout = "3s"
-# private_key = "replace-me"
 # listen_port = 51820
 # advertise_host = "198.51.100.10"
+# advertised_routes = ["10.20.0.0/24"]
+
+# Auto-generated on first start into /etc/meshlink/client.state.json:
+# private_key
+# public_key

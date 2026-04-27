@@ -92,6 +92,9 @@ dist/windows/<target>/meshlink-client_<version>_<target>.zip
 ```
 
 脚本会打印推荐的静态 IPv4、网关和 DNS。首次安装完成后，或者首次从模板导入后，在 Windows 里按这些参数手工设置网卡。
+Windows VM 的 qcow2 磁盘默认也会创建在 `/var/lib/libvirt/images`；如果你要沿用命名
+libvirt storage pool，可以在 `tests/nat-lab/libvirt.env` 里改设
+`MESHLINK_LIBVIRT_POOL`。
 
 默认情况下，`create-vm.sh` 还会给域 XML 加上 `org.qemu.guest_agent.0`
 channel。对已经存在的 VM，可以执行：
@@ -141,18 +144,15 @@ powershell.exe -ExecutionPolicy Bypass -File .\run-meshlinkd.ps1
 推荐配置示例：
 
 ```toml
-node_name = "win-a"
 management_addr = "replace-with-mgmt-ip:33073"
-signal_addr = "replace-with-mgmt-ip:10000"
-relay_addr = "replace-with-mgmt-ip:3478"
-stun_addr = "replace-with-mgmt-ip:3479"
-bootstrap_token = "meshlink-dev-token"
-public_key = "replace-me"
-private_key = "replace-me"
-interface_name = "MeshLink"
-listen_port = 51820
-log_level = "info"
 ```
+
+如果你只填写 `management_addr`，客户端会自动：
+
+1. 使用默认 bootstrap token `meshlink-dev-token`
+2. 按同一 host 推导 `signal_addr=:10000`、`relay_addr=:3478`、`stun_addr=:3479`
+3. 首次启动生成 `client.state.json`，保存 `private_key` / `public_key`
+4. 使用默认接口名 `MeshLink` 和默认监听端口 `51820`
 
 这里的 `replace-with-mgmt-ip` 应该替换成当前实验室的 `MESHLINK_MGMT_IP`，默认常见值是 `192.168.122.201`，但如果你的 libvirt 默认网段不是 `192.168.122.0/24`，以实际环境为准。
 
@@ -193,9 +193,9 @@ MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/windows-vm/run-phase08-validation.sh
 3. 生成新的 Windows WireGuard 密钥并写入 `client.toml`
 4. 在 dual-NAT 实验室里自动避开与同侧 Linux client 冲突的
    Windows WireGuard 监听端口
-5. 校验同侧 Linux peer 的 direct endpoint
-6. 注入对侧 NAT drop 规则并校验 relay fallback
-7. 清理故障规则后校验 direct recovery
+5. 校验 Windows 端 service config 的 direct endpoint 与 overlay 连通性
+6. 注入对侧 NAT drop 规则并校验 relay fallback 与 overlay 连通性
+7. 清理故障规则后校验 direct recovery 与 overlay 连通性
 8. 校验 Linux 广播路由在 Windows 端的 `AllowedIPs`、路由表与可达性
 9. 校验路由撤销后的清理行为
 10. 把 Windows 配置、日志和 Linux `wg show` 结果收集到
@@ -207,8 +207,8 @@ MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/windows-vm/run-phase08-validation.sh
 
 1. 确认 Windows 端成功注册并收到 peer
 2. 确认 Linux peer 也看到了 Windows 节点
-3. 确认 Windows 生成的 `C:\ProgramData\MeshLink\<interface>.conf` 里 endpoint 指向对端 NAT WAN 地址
-4. 验证 overlay ping 正常
+3. 确认 Windows 生成的 `C:\ProgramData\MeshLink\<interface>.conf` 里 endpoint 指向同侧 Linux peer
+4. 验证 Windows 到 peer overlay 的 ping 正常
 
 如果装了 qemu-ga，可以额外从宿主机确认：
 
@@ -241,8 +241,8 @@ MESHLINK_WINDOWS_WG_PORT=51820 \
 验证点：
 
 1. 注入 drop 后，overlay 流量还能继续通
-2. Windows 端日志出现 relay fallback
-3. 清理 drop 后，路径恢复为 direct
+2. Windows 端 service config 中对侧 peer endpoint 切到 relay host
+3. 清理 drop 后，Windows 端对侧 peer endpoint 恢复为 direct
 
 ### 路由发布
 

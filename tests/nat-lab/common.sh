@@ -7,7 +7,8 @@ MESHLINK_LAB_PREFIX="${MESHLINK_LAB_PREFIX:-meshlink}"
 MESHLINK_LAB_TOPOLOGY="${MESHLINK_LAB_TOPOLOGY:-}"
 MESHLINK_LIBVIRT_NETWORK="${MESHLINK_LIBVIRT_NETWORK:-default}"
 MESHLINK_UPSTREAM_NETWORK="${MESHLINK_UPSTREAM_NETWORK:-}"
-MESHLINK_LIBVIRT_POOL="${MESHLINK_LIBVIRT_POOL:-default}"
+MESHLINK_LIBVIRT_IMAGE_DIR="${MESHLINK_LIBVIRT_IMAGE_DIR:-}"
+MESHLINK_LIBVIRT_POOL="${MESHLINK_LIBVIRT_POOL:-}"
 MESHLINK_OS_VARIANT="${MESHLINK_OS_VARIANT:-ubuntu22.04}"
 MESHLINK_VM_MEMORY_MB="${MESHLINK_VM_MEMORY_MB:-2048}"
 MESHLINK_VM_VCPUS="${MESHLINK_VM_VCPUS:-2}"
@@ -219,6 +220,70 @@ require_commands() {
 
 pool_path() {
   virsh pool-dumpxml "$MESHLINK_LIBVIRT_POOL" | sed -n 's:.*<path>\(.*\)</path>.*:\1:p' | head -n1
+}
+
+image_dir() {
+  if [[ -n "$MESHLINK_LIBVIRT_IMAGE_DIR" ]]; then
+    printf '%s\n' "$MESHLINK_LIBVIRT_IMAGE_DIR"
+    return
+  fi
+
+  if [[ -n "$MESHLINK_LIBVIRT_POOL" ]]; then
+    pool_path
+    return
+  fi
+
+  printf '/var/lib/libvirt/images\n'
+}
+
+path_requires_sudo() {
+  local path="$1"
+
+  if [[ -e "$path" ]]; then
+    [[ ! -w "$path" ]]
+    return
+  fi
+
+  [[ ! -w "$(dirname "$path")" ]]
+}
+
+ensure_dir() {
+  local dir="$1"
+
+  if [[ -d "$dir" ]]; then
+    return
+  fi
+
+  if [[ -w "$(dirname "$dir")" ]]; then
+    mkdir -p "$dir"
+  else
+    sudo mkdir -p "$dir"
+  fi
+}
+
+run_qemu_img_for_path() {
+  local path="$1"
+  shift
+
+  if path_requires_sudo "$path"; then
+    sudo qemu-img "$@"
+  else
+    qemu-img "$@"
+  fi
+}
+
+remove_file() {
+  local path="$1"
+
+  if [[ ! -e "$path" ]]; then
+    return
+  fi
+
+  if path_requires_sudo "$path"; then
+    sudo rm -f "$path"
+  else
+    rm -f "$path"
+  fi
 }
 
 cidr_prefix() {
@@ -523,6 +588,47 @@ destroy_isolated_network() {
     virsh net-destroy "$network_name" >/dev/null 2>&1 || true
     virsh net-undefine "$network_name" >/dev/null 2>&1 || true
   fi
+}
+
+ensure_host_forward_drop_rule() {
+  local in_iface="$1"
+  local out_iface="$2"
+  local comment="$3"
+
+  sudo iptables -C FORWARD -i "$in_iface" -o "$out_iface" -m comment --comment "$comment" -j DROP 2>/dev/null ||
+    sudo iptables -I FORWARD 1 -i "$in_iface" -o "$out_iface" -m comment --comment "$comment" -j DROP
+}
+
+clear_host_forward_drop_rule() {
+  local in_iface="$1"
+  local out_iface="$2"
+  local comment="$3"
+
+  sudo iptables -D FORWARD -i "$in_iface" -o "$out_iface" -m comment --comment "$comment" -j DROP 2>/dev/null || true
+}
+
+ensure_dual_nat_host_isolation() {
+  require_dual_nat_topology
+
+  ensure_host_forward_drop_rule "virbr0" "$MESHLINK_NAT_A_BRIDGE_NAME" "meshlink-host-isolation-virbr0-to-nat-a"
+  ensure_host_forward_drop_rule "$MESHLINK_NAT_A_BRIDGE_NAME" "virbr0" "meshlink-host-isolation-nat-a-to-virbr0"
+  ensure_host_forward_drop_rule "virbr0" "$MESHLINK_NAT_B_BRIDGE_NAME" "meshlink-host-isolation-virbr0-to-nat-b"
+  ensure_host_forward_drop_rule "$MESHLINK_NAT_B_BRIDGE_NAME" "virbr0" "meshlink-host-isolation-nat-b-to-virbr0"
+  ensure_host_forward_drop_rule "$MESHLINK_NAT_A_BRIDGE_NAME" "$MESHLINK_NAT_B_BRIDGE_NAME" "meshlink-host-isolation-nat-a-to-nat-b"
+  ensure_host_forward_drop_rule "$MESHLINK_NAT_B_BRIDGE_NAME" "$MESHLINK_NAT_A_BRIDGE_NAME" "meshlink-host-isolation-nat-b-to-nat-a"
+}
+
+clear_dual_nat_host_isolation() {
+  if [[ "$MESHLINK_LAB_TOPOLOGY" != "dual-nat" ]]; then
+    return
+  fi
+
+  clear_host_forward_drop_rule "virbr0" "$MESHLINK_NAT_A_BRIDGE_NAME" "meshlink-host-isolation-virbr0-to-nat-a"
+  clear_host_forward_drop_rule "$MESHLINK_NAT_A_BRIDGE_NAME" "virbr0" "meshlink-host-isolation-nat-a-to-virbr0"
+  clear_host_forward_drop_rule "virbr0" "$MESHLINK_NAT_B_BRIDGE_NAME" "meshlink-host-isolation-virbr0-to-nat-b"
+  clear_host_forward_drop_rule "$MESHLINK_NAT_B_BRIDGE_NAME" "virbr0" "meshlink-host-isolation-nat-b-to-virbr0"
+  clear_host_forward_drop_rule "$MESHLINK_NAT_A_BRIDGE_NAME" "$MESHLINK_NAT_B_BRIDGE_NAME" "meshlink-host-isolation-nat-a-to-nat-b"
+  clear_host_forward_drop_rule "$MESHLINK_NAT_B_BRIDGE_NAME" "$MESHLINK_NAT_A_BRIDGE_NAME" "meshlink-host-isolation-nat-b-to-nat-a"
 }
 
 write_standard_user_data() {

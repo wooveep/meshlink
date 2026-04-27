@@ -18,17 +18,20 @@ if [[ ! -f "$MESHLINK_BASE_IMAGE" ]]; then
   exit 1
 fi
 
-POOL_PATH="$(pool_path)"
-if [[ -z "$POOL_PATH" ]]; then
-  echo "failed to resolve pool path for $MESHLINK_LIBVIRT_POOL" >&2
+IMAGE_DIR="$(image_dir)"
+if [[ -z "$IMAGE_DIR" ]]; then
+  echo "failed to resolve image directory from MESHLINK_LIBVIRT_IMAGE_DIR or MESHLINK_LIBVIRT_POOL" >&2
   exit 1
 fi
+
+ensure_dir "$IMAGE_DIR"
 
 mkdir -p "$MESHLINK_LAB_STATE_DIR"
 
 if [[ "$MESHLINK_LAB_TOPOLOGY" == "dual-nat" ]]; then
   ensure_isolated_network "$MESHLINK_NAT_A_NETWORK_NAME" "$MESHLINK_NAT_A_BRIDGE_NAME" "$MESHLINK_NAT_A_LAN_HOST_IP" "$MESHLINK_NAT_A_LAN_CIDR"
   ensure_isolated_network "$MESHLINK_NAT_B_NETWORK_NAME" "$MESHLINK_NAT_B_BRIDGE_NAME" "$MESHLINK_NAT_B_LAN_HOST_IP" "$MESHLINK_NAT_B_LAN_CIDR"
+  ensure_dual_nat_host_isolation
 fi
 
 create_vm() {
@@ -38,7 +41,7 @@ create_vm() {
   local -a network_args
 
   name="$(vm_name "$node")"
-  disk_path="$POOL_PATH/${name}.qcow2"
+  disk_path="$IMAGE_DIR/${name}.qcow2"
   network_args=()
 
   if virsh dominfo "$name" >/dev/null 2>&1; then
@@ -75,7 +78,7 @@ create_vm() {
 
   write_cloud_init_files "$node"
   build_seed_iso "$node"
-  qemu-img create -f qcow2 -F qcow2 -b "$MESHLINK_BASE_IMAGE" "$disk_path" >/dev/null
+  run_qemu_img_for_path "$disk_path" create -f qcow2 -F qcow2 -b "$MESHLINK_BASE_IMAGE" "$disk_path" >/dev/null
 
   virt-install \
     --name "$name" \

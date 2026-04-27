@@ -14,6 +14,7 @@ MESHLINK_INTERFACE_NAME="${MESHLINK_INTERFACE_NAME:-sdwan0}"
 MESHLINK_SIGNAL_PORT="${MESHLINK_SIGNAL_PORT:-10000}"
 MESHLINK_RELAY_PORT="${MESHLINK_RELAY_PORT:-3478}"
 MESHLINK_STUN_PORT="${MESHLINK_STUN_PORT:-3479}"
+MESHLINK_PUNCH_TIMEOUT="${MESHLINK_PUNCH_TIMEOUT:-15s}"
 MESHLINK_CLIENT_A_WG_PORT="${MESHLINK_CLIENT_A_WG_PORT:-51820}"
 MESHLINK_CLIENT_B_WG_PORT="${MESHLINK_CLIENT_B_WG_PORT:-51821}"
 CLIENT_A_OVERLAY="100.64.0.1"
@@ -60,24 +61,24 @@ private_key = "${private_key}"
 interface_name = "${MESHLINK_INTERFACE_NAME}"
 listen_port = ${listen_port}
 log_level = "info"
-punch_timeout = "5s"
+punch_timeout = "${MESHLINK_PUNCH_TIMEOUT}"
 EOF
 }
 
 copy_runtime() {
   local node="$1"
-  ssh_to_vm "$node" "mkdir -p ${REMOTE_ROOT}/bin ${REMOTE_ROOT}/config ${REMOTE_ROOT}/logs && sudo systemctl stop meshlink-managementd 2>/dev/null || true && sudo systemctl stop meshlink-signald 2>/dev/null || true && sudo systemctl stop meshlink-client 2>/dev/null || true && sudo pkill -x managementd || true && sudo pkill -x signald || true && sudo pkill -x meshlinkd || true"
+  ssh_to_vm "$node" "mkdir -p ${REMOTE_ROOT}/bin ${REMOTE_ROOT}/config ${REMOTE_ROOT}/logs && rm -f ${REMOTE_ROOT}/bin/*.new && sudo systemctl stop meshlink-managementd 2>/dev/null || true && sudo systemctl stop meshlink-signald 2>/dev/null || true && sudo systemctl stop meshlink-client 2>/dev/null || true && sudo pkill -x managementd || true && sudo pkill -x signald || true && sudo pkill -x meshlinkd || true"
   if [[ "$node" == "mgmt-1" ]]; then
-    scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/managementd" "$node" "${REMOTE_ROOT}/bin/managementd.new"
-    scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/signald" "$node" "${REMOTE_ROOT}/bin/signald.new"
-    scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/relayd" "$node" "${REMOTE_ROOT}/bin/relayd.new"
-    ssh_to_vm "$node" "mv -f ${REMOTE_ROOT}/bin/managementd.new ${REMOTE_ROOT}/bin/managementd && mv -f ${REMOTE_ROOT}/bin/signald.new ${REMOTE_ROOT}/bin/signald && mv -f ${REMOTE_ROOT}/bin/relayd.new ${REMOTE_ROOT}/bin/relayd"
+    ssh_to_vm "$node" "rm -f ${REMOTE_ROOT}/bin/managementd ${REMOTE_ROOT}/bin/signald ${REMOTE_ROOT}/bin/relayd"
+    scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/managementd" "$node" "${REMOTE_ROOT}/bin/managementd"
+    scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/signald" "$node" "${REMOTE_ROOT}/bin/signald"
+    scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/relayd" "$node" "${REMOTE_ROOT}/bin/relayd"
     return
   fi
 
-  scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/meshlinkd" "$node" "${REMOTE_ROOT}/bin/meshlinkd.new"
+  ssh_to_vm "$node" "rm -f ${REMOTE_ROOT}/bin/meshlinkd ${REMOTE_ROOT}/bin/meshlinkd.new"
+  scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/meshlinkd" "$node" "${REMOTE_ROOT}/bin/meshlinkd"
   scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/config/${node}.toml" "$node" "${REMOTE_ROOT}/config/client.toml"
-  ssh_to_vm "$node" "mv -f ${REMOTE_ROOT}/bin/meshlinkd.new ${REMOTE_ROOT}/bin/meshlinkd"
 }
 
 start_managementd() {
@@ -89,7 +90,7 @@ start_signald() {
 }
 
 start_relayd() {
-  ssh_to_vm mgmt-1 "sudo pkill -x relayd || true; nohup ${REMOTE_ROOT}/bin/relayd -listen 0.0.0.0:${MESHLINK_RELAY_PORT} -management-addr 127.0.0.1:${MESHLINK_MANAGEMENT_PORT} > ${REMOTE_ROOT}/logs/relayd.log 2>&1 < /dev/null &"
+  ssh_to_vm mgmt-1 "sudo pkill -x relayd || true; nohup ${REMOTE_ROOT}/bin/relayd -listen 0.0.0.0:${MESHLINK_RELAY_PORT} -management-addr 127.0.0.1:${MESHLINK_MANAGEMENT_PORT} -advertise-host ${MGMT_IP} > ${REMOTE_ROOT}/logs/relayd.log 2>&1 < /dev/null &"
 }
 
 start_client() {
@@ -151,6 +152,25 @@ wait_for_remote_log() {
   done
 
   echo "timed out waiting for log pattern on ${node}: ${pattern}" >&2
+  return 1
+}
+
+wait_for_remote_log_regex() {
+  local node="$1"
+  local path="$2"
+  local pattern="$3"
+  local attempts="${4:-30}"
+  local attempt=1
+
+  while (( attempt <= attempts )); do
+    if ssh_to_vm "$node" "grep -Eq '$pattern' '$path'" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+
+  echo "timed out waiting for regex log pattern on ${node}: ${pattern}" >&2
   return 1
 }
 
@@ -241,14 +261,26 @@ wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/signald.log" "signald STUN liste
 wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/relayd.log" "relayd listening on 0.0.0.0:${MESHLINK_RELAY_PORT}"
 wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "device registered"
 wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "device registered"
+wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "punch socket runtime ready"
+wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "punch socket runtime ready"
+if [[ "$MESHLINK_LAB_TOPOLOGY" == "dual-nat" ]]; then
+  wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "linux public udp proxy ready public_addr=0.0.0.0:${MESHLINK_CLIENT_A_WG_PORT}"
+  wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "linux public udp proxy ready public_addr=0.0.0.0:${MESHLINK_CLIENT_B_WG_PORT}"
+fi
 wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "received candidate announcement"
 wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "received candidate announcement"
+if [[ "$MESHLINK_LAB_TOPOLOGY" == "dual-nat" ]]; then
+  wait_for_remote_log_regex client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "starting punch attempt|updated local public candidate from peer observed source endpoint|updated remote candidate from punch socket observation|observed remote source endpoint via wireguard runtime telemetry"
+  wait_for_remote_log_regex client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "starting punch attempt|updated local public candidate from peer observed source endpoint|updated remote candidate from punch socket observation|observed remote source endpoint via wireguard runtime telemetry"
+fi
 wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "hole punch handshake observed"
 wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "hole punch handshake observed"
 
 if [[ "$MESHLINK_LAB_TOPOLOGY" == "dual-nat" ]]; then
-  wait_for_wg_endpoint client-a "$CLIENT_B_PUBLIC_KEY" "$MESHLINK_NAT_B_WAN_IP" "$MESHLINK_CLIENT_B_WG_PORT" 40
-  wait_for_wg_endpoint client-b "$CLIENT_A_PUBLIC_KEY" "$MESHLINK_NAT_A_WAN_IP" "$MESHLINK_CLIENT_A_WG_PORT" 40
+  if ! ssh_to_vm client-a "grep -q 'linux public udp proxy ready' '${REMOTE_ROOT}/logs/meshlinkd.log'" >/dev/null 2>&1; then
+    wait_for_wg_endpoint client-a "$CLIENT_B_PUBLIC_KEY" "$MESHLINK_NAT_B_WAN_IP" "$MESHLINK_CLIENT_B_WG_PORT" 40
+    wait_for_wg_endpoint client-b "$CLIENT_A_PUBLIC_KEY" "$MESHLINK_NAT_A_WAN_IP" "$MESHLINK_CLIENT_A_WG_PORT" 40
+  fi
 else
   wait_for_wg_endpoint client-a "$CLIENT_B_PUBLIC_KEY" "$MESHLINK_CLIENT_B_IP" "$MESHLINK_CLIENT_B_WG_PORT" 20
   wait_for_wg_endpoint client-b "$CLIENT_A_PUBLIC_KEY" "$MESHLINK_CLIENT_A_IP" "$MESHLINK_CLIENT_A_WG_PORT" 20

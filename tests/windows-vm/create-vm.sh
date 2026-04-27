@@ -101,14 +101,16 @@ if virsh dominfo "$MESHLINK_WINDOWS_VM_NAME" >/dev/null 2>&1; then
   exit 1
 fi
 
-POOL_PATH="$(pool_path)"
-if [[ -z "$POOL_PATH" ]]; then
-  echo "failed to resolve libvirt pool path for $MESHLINK_LIBVIRT_POOL" >&2
+IMAGE_DIR="$(image_dir)"
+if [[ -z "$IMAGE_DIR" ]]; then
+  echo "failed to resolve image directory from MESHLINK_LIBVIRT_IMAGE_DIR or MESHLINK_LIBVIRT_POOL" >&2
   exit 1
 fi
 
+ensure_dir "$IMAGE_DIR"
+
 NETWORK_NAME="$(resolve_windows_network)"
-WINDOWS_DISK_PATH="$POOL_PATH/${MESHLINK_WINDOWS_VM_NAME}.qcow2"
+WINDOWS_DISK_PATH="$IMAGE_DIR/${MESHLINK_WINDOWS_VM_NAME}.qcow2"
 WINDOWS_STATE_DIR="$MESHLINK_LAB_STATE_DIR/windows/$MESHLINK_WINDOWS_VM_NAME"
 PACKAGE_ISO_PATH="$WINDOWS_STATE_DIR/meshlink-package.iso"
 BOOT_ARGS=()
@@ -119,6 +121,10 @@ if [[ -e "$WINDOWS_DISK_PATH" ]]; then
 fi
 
 mkdir -p "$WINDOWS_STATE_DIR"
+
+if path_requires_sudo "$WINDOWS_DISK_PATH"; then
+  MESHLINK_WINDOWS_QEMU_IMG_USE_SUDO=1
+fi
 
 if [[ -n "$MESHLINK_WINDOWS_BASE_DISK" ]]; then
   if [[ ! -f "$MESHLINK_WINDOWS_BASE_DISK" ]]; then
@@ -154,7 +160,7 @@ else
     exit 1
   fi
 
-  run_qemu_img create -f qcow2 "$WINDOWS_DISK_PATH" "${MESHLINK_WINDOWS_DISK_GB}G" >/dev/null
+  run_qemu_img_for_path "$WINDOWS_DISK_PATH" create -f qcow2 "$WINDOWS_DISK_PATH" "${MESHLINK_WINDOWS_DISK_GB}G" >/dev/null
   BOOT_ARGS+=(--cdrom "$MESHLINK_WINDOWS_ISO")
 fi
 

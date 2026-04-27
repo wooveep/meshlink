@@ -32,11 +32,20 @@ async fn query_with_bind_addr(
     wait_timeout: Duration,
     bind_addr: &str,
 ) -> Result<StunResult> {
-    let transaction_id = generate_transaction_id();
-    let request = encode_binding_request(transaction_id);
     let socket = UdpSocket::bind(bind_addr)
         .await
         .with_context(|| format!("bind stun udp socket on {bind_addr}"))?;
+
+    query_on_socket(&socket, stun_addr, wait_timeout).await
+}
+
+pub async fn query_on_socket(
+    socket: &UdpSocket,
+    stun_addr: &str,
+    wait_timeout: Duration,
+) -> Result<StunResult> {
+    let transaction_id = generate_transaction_id();
+    let request = encode_binding_request(transaction_id);
 
     socket
         .send_to(&request, stun_addr)
@@ -123,7 +132,7 @@ pub fn decode_binding_response(packet: &[u8], transaction_id: [u8; 12]) -> Resul
     Err(anyhow!("stun response missing xor-mapped-address"))
 }
 
-fn generate_transaction_id() -> [u8; 12] {
+pub fn generate_transaction_id() -> [u8; 12] {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

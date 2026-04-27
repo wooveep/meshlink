@@ -8,6 +8,8 @@ license.workspace = true
 anyhow.workspace = true
 libc = "0.2"
 tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 wg-manager = { path = "../wg-manager" }
 
 [build-dependencies]

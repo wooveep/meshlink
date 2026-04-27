@@ -29,6 +29,7 @@ message PunchResult {
   Candidate selected_candidate = 2;
   PathType path_type = 3;
   string reason = 4;
+  Candidate observed_candidate = 5;
 }
 
 message Heartbeat {}

@@ -23,8 +23,11 @@
    只负责候选竞速和路径选择状态。
 4. `wg-manager`
    只负责 WireGuard 接口与 Peer 写入。
-5. 平台 crate 只暴露平台差异能力，不包含业务决策。
-6. `wintun-windows`
+5. `netlink-linux`
+   可以暴露 Linux-specific runtime 能力，例如内核 WG 控制、最新握手查询，以及
+   位于内核 WG 前面的 public UDP proxy；但不负责路径选择策略。
+6. 平台 crate 只暴露平台差异能力，不包含业务决策。
+7. `wintun-windows`
    只负责 Windows embedded tunnel-service、服务生命周期和运行时资产检查，不处理路径选择或控制面协议。
 
 ## 修改原则

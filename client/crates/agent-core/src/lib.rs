@@ -1,10 +1,12 @@
+mod punch_socket;
 mod signal;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     future::pending,
-    path::Path,
+    io::ErrorKind,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
 };
@@ -15,16 +17,22 @@ use api_client::proto::{
     Device, DirectEndpoint, Peer, RegisterDeviceRequest, SyncConfigEvent, SyncConfigEventType,
     SyncConfigRequest,
 };
-use netlink_linux::LinuxWireGuardBackend;
-use serde::{de::Error as DeError, Deserialize, Deserializer};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use netlink_linux::{LinuxWireGuardBackend, PublicUdpProxy};
+use rand_core::OsRng;
+use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use wg_manager::{build_desired_state_with_overrides, Endpoint, WireGuardBackend};
 use wintun_windows::WindowsWireGuardBackend;
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+
+use crate::punch_socket::PunchSocket;
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct AgentConfig {
-    pub node_name: String,
+struct RawAgentConfig {
+    #[serde(default)]
+    pub node_name: Option<String>,
     pub management_addr: String,
     #[serde(default)]
     pub signal_addr: Option<String>,
@@ -32,9 +40,12 @@ pub struct AgentConfig {
     pub relay_addr: Option<String>,
     #[serde(default)]
     pub stun_addr: Option<String>,
-    pub bootstrap_token: String,
-    pub public_key: String,
-    pub interface_name: String,
+    #[serde(default)]
+    pub bootstrap_token: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    pub interface_name: Option<String>,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default = "default_os")]
@@ -56,13 +67,149 @@ pub struct AgentConfig {
     pub punch_timeout: Duration,
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentConfig {
+    pub node_name: String,
+    pub management_addr: String,
+    pub signal_addr: Option<String>,
+    pub relay_addr: Option<String>,
+    pub stun_addr: Option<String>,
+    pub bootstrap_token: String,
+    pub public_key: String,
+    pub interface_name: String,
+    pub log_level: String,
+    pub os: String,
+    pub version: String,
+    pub private_key: Option<String>,
+    pub listen_port: Option<u16>,
+    pub advertise_host: Option<String>,
+    pub advertised_routes: Vec<String>,
+    pub punch_timeout: Duration,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct StoredIdentity {
+    private_key: String,
+    public_key: String,
+}
+
 impl AgentConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw =
             fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
-        let config: Self =
+        let raw: RawAgentConfig =
             toml::from_str(&raw).with_context(|| format!("parse config {}", path.display()))?;
-        Ok(config)
+        Self::from_raw(path, raw)
+    }
+
+    fn from_raw(path: &Path, raw: RawAgentConfig) -> Result<Self> {
+        let mut identity = load_stored_identity(path)?;
+        let mut identity_changed = false;
+        let management_addr = normalize_management_addr(&raw.management_addr);
+        let management_host = host_from_addr(&management_addr);
+        let runtime_wireguard = supports_runtime_wireguard_os(&raw.os);
+
+        let configured_private = clean_option(raw.private_key.as_deref());
+        let configured_public = clean_option(raw.public_key.as_deref());
+        let auto_service_addrs = raw.signal_addr.is_none()
+            && raw.relay_addr.is_none()
+            && raw.stun_addr.is_none()
+            && raw.advertise_host.is_none()
+            && configured_private.is_none()
+            && configured_public.is_none();
+
+        let private_key = configured_private
+            .clone()
+            .or_else(|| clean_option(Some(identity.private_key.as_str())));
+        let public_key = match private_key.as_deref() {
+            Some(private_key) => derive_public_key(private_key)?,
+            None => configured_public
+                .clone()
+                .or_else(|| clean_option(Some(identity.public_key.as_str())))
+                .or_else(|| {
+                    if runtime_wireguard {
+                        let generated = generate_wireguard_keypair();
+                        identity = generated.clone();
+                        identity_changed = true;
+                        Some(generated.public_key)
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| anyhow!("public_key is required"))?,
+        };
+
+        let private_key = private_key.or_else(|| {
+            if runtime_wireguard && configured_public.is_none() {
+                Some(identity.private_key.clone())
+            } else {
+                None
+            }
+        });
+
+        let should_persist_identity = runtime_wireguard
+            && private_key.is_some()
+            && (identity_changed
+                || clean_option(Some(identity.private_key.as_str())) != private_key
+                || clean_option(Some(identity.public_key.as_str())) != Some(public_key.clone()));
+        if should_persist_identity {
+            identity.private_key = private_key.clone().unwrap_or_default();
+            identity.public_key = public_key.clone();
+            save_stored_identity(path, &identity)?;
+        }
+
+        let auto_signal_addr = if auto_service_addrs && private_key.is_some() {
+            Some(derive_service_addr(&management_host, 10000))
+        } else {
+            None
+        };
+        let signal_addr = raw.signal_addr.clone().or(auto_signal_addr);
+        let relay_addr = raw.relay_addr.clone().or_else(|| {
+            if signal_addr.is_some() {
+                Some(derive_service_addr(&management_host, 3478))
+            } else {
+                None
+            }
+        });
+        let stun_addr = raw.stun_addr.clone().or_else(|| {
+            signal_addr
+                .as_ref()
+                .map(|_| derive_service_addr(&management_host, 3479))
+        });
+
+        Ok(Self {
+            node_name: raw
+                .node_name
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| default_node_name(&public_key)),
+            management_addr,
+            signal_addr,
+            relay_addr,
+            stun_addr,
+            bootstrap_token: raw
+                .bootstrap_token
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(default_bootstrap_token),
+            public_key,
+            interface_name: raw
+                .interface_name
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| default_interface_name(&raw.os)),
+            log_level: raw.log_level,
+            os: raw.os,
+            version: raw.version,
+            private_key,
+            listen_port: raw.listen_port.or_else(|| {
+                if runtime_wireguard {
+                    Some(default_listen_port())
+                } else {
+                    None
+                }
+            }),
+            advertise_host: raw.advertise_host.filter(|value| !value.trim().is_empty()),
+            advertised_routes: raw.advertised_routes,
+            punch_timeout: raw.punch_timeout,
+        })
     }
 
     fn registration_direct_endpoint(&self) -> Option<DirectEndpoint> {
@@ -145,6 +292,7 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
         .context("connect management service")?;
     let mut peer_cache = PeerCache::default();
     let backend = build_runtime_backend(config);
+    let mut linux_public_proxy = maybe_start_linux_public_proxy(config).await?;
 
     let response = client
         .register_device(build_register_device_request(config))
@@ -171,9 +319,19 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
         "device registered"
     );
 
-    let initial_signal_candidates = signal::bootstrap_local_candidates(config).await;
-    let mut signal_runtime =
-        signal::SignalRuntime::spawn(config.clone(), device.id.clone(), initial_signal_candidates);
+    let mut initial_signal_candidates = if config.signal_addr.is_some() {
+        let candidates = if let Some(proxy) = linux_public_proxy.as_ref() {
+            let mut punch_socket =
+                PunchSocket::from_socket(proxy.public_socket(), config.listen_port)?;
+            signal::bootstrap_local_candidates_with_socket(config, &mut punch_socket).await
+        } else {
+            signal::bootstrap_local_candidates(config).await
+        };
+        Some(candidates)
+    } else {
+        None
+    };
+    let mut signal_runtime: Option<signal::SignalRuntime> = None;
     let mut endpoint_overrides = BTreeMap::<String, Endpoint>::new();
     let mut last_self_device: Option<Device> = None;
 
@@ -227,9 +385,6 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
                 }
 
                 let snapshot = peer_cache.snapshot();
-                if let Some(runtime) = signal_runtime.as_ref() {
-                    runtime.publish_snapshot(snapshot.clone());
-                }
                 info!(
                     event_type,
                     revision = %snapshot.revision,
@@ -243,13 +398,33 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
                     "received config event"
                 );
 
-                reconcile_wireguard_state(
+                reconcile_runtime_state(
                     config,
                     backend.as_ref(),
                     &self_device,
                     &snapshot.peers,
                     &endpoint_overrides,
-                )?;
+                    linux_public_proxy.as_ref(),
+                )
+                .await?;
+
+                if signal_runtime.is_none() && config.signal_addr.is_some() {
+                    signal_runtime = signal::SignalRuntime::spawn(
+                        config.clone(),
+                        device.id.clone(),
+                        initial_signal_candidates.take().unwrap_or_default(),
+                        linux_public_proxy
+                            .as_mut()
+                            .map(|proxy| PunchSocket::from_socket(proxy.public_socket(), config.listen_port))
+                            .transpose()?,
+                        linux_public_proxy
+                            .as_mut()
+                            .and_then(PublicUdpProxy::take_observation_rx),
+                    );
+                }
+                if let Some(runtime) = signal_runtime.as_ref() {
+                    runtime.publish_snapshot(snapshot.clone());
+                }
             }
             update = signal_update => {
                 let Some(update) = update else {
@@ -273,13 +448,15 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
 
                 if let Some(self_device) = last_self_device.as_ref() {
                     let snapshot = peer_cache.snapshot();
-                    reconcile_wireguard_state(
+                    reconcile_runtime_state(
                         config,
                         backend.as_ref(),
                         self_device,
                         &snapshot.peers,
                         &endpoint_overrides,
-                    )?;
+                        linux_public_proxy.as_ref(),
+                    )
+                    .await?;
                     if let Some(probe_overlay_ipv4) = update.probe_overlay_ipv4.as_deref() {
                         trigger_wireguard_probe(probe_overlay_ipv4);
                     }
@@ -291,20 +468,51 @@ async fn register_and_sync(config: &AgentConfig) -> Result<()> {
     Ok(())
 }
 
+async fn reconcile_runtime_state(
+    config: &AgentConfig,
+    backend: Option<&RuntimeWireGuardBackend>,
+    self_device: &Device,
+    peers: &[CachedPeer],
+    endpoint_overrides: &BTreeMap<String, Endpoint>,
+    linux_public_proxy: Option<&PublicUdpProxy>,
+) -> Result<()> {
+    let (wg_endpoint_overrides, listen_port_override) = if let Some(proxy) = linux_public_proxy {
+        (
+            sync_linux_public_proxy(proxy, peers, endpoint_overrides).await?,
+            Some(proxy.kernel_listen_port()),
+        )
+    } else {
+        (endpoint_overrides.clone(), None)
+    };
+
+    reconcile_wireguard_state(
+        config,
+        backend,
+        self_device,
+        peers,
+        &wg_endpoint_overrides,
+        listen_port_override,
+    )
+}
+
 fn reconcile_wireguard_state(
     config: &AgentConfig,
     backend: Option<&RuntimeWireGuardBackend>,
     self_device: &Device,
     peers: &[CachedPeer],
     endpoint_overrides: &BTreeMap<String, Endpoint>,
+    listen_port_override: Option<u16>,
 ) -> Result<()> {
     let Some(backend) = backend else {
         return Ok(());
     };
 
-    let Some(settings) = config.linux_tunnel_settings() else {
+    let Some(mut settings) = config.linux_tunnel_settings() else {
         return Ok(());
     };
+    if let Some(listen_port) = listen_port_override {
+        settings.listen_port = listen_port;
+    }
 
     let outcome = build_desired_state_with_overrides(
         &config.interface_name,
@@ -337,6 +545,60 @@ fn reconcile_wireguard_state(
     );
 
     Ok(())
+}
+
+async fn maybe_start_linux_public_proxy(config: &AgentConfig) -> Result<Option<PublicUdpProxy>> {
+    let Some(listen_port) = config.listen_port else {
+        return Ok(None);
+    };
+    if config.os != "linux" || config.signal_addr.is_none() || config.private_key.is_none() {
+        return Ok(None);
+    }
+
+    let proxy = PublicUdpProxy::bind(listen_port)
+        .await
+        .with_context(|| format!("start linux public udp proxy on port {listen_port}"))?;
+    info!(
+        public_addr = %proxy.public_addr()?.to_string(),
+        kernel_listen_port = proxy.kernel_listen_port(),
+        "linux public udp proxy ready"
+    );
+    Ok(Some(proxy))
+}
+
+async fn sync_linux_public_proxy(
+    proxy: &PublicUdpProxy,
+    peers: &[CachedPeer],
+    endpoint_overrides: &BTreeMap<String, Endpoint>,
+) -> Result<BTreeMap<String, Endpoint>> {
+    let visible = peers
+        .iter()
+        .map(|peer| peer.peer_id.clone())
+        .collect::<BTreeSet<_>>();
+    proxy.retain_only(&visible).await;
+
+    let mut local_endpoints = BTreeMap::new();
+    for peer in peers {
+        let handle = proxy.ensure_peer(&peer.peer_id).await?;
+        let remote_endpoint = endpoint_overrides
+            .get(&peer.peer_id)
+            .cloned()
+            .or_else(|| cached_direct_endpoint(peer));
+        proxy
+            .set_peer_remote_endpoint(&peer.peer_id, remote_endpoint)
+            .await?;
+        local_endpoints.insert(peer.peer_id.clone(), handle.loopback_endpoint);
+    }
+
+    Ok(local_endpoints)
+}
+
+fn cached_direct_endpoint(peer: &CachedPeer) -> Option<Endpoint> {
+    let endpoint = peer.direct_endpoint.as_ref()?;
+    Some(Endpoint {
+        host: endpoint.host.clone(),
+        port: u16::try_from(endpoint.port).ok()?,
+    })
 }
 
 fn cached_peers_to_proto(peers: &[CachedPeer]) -> Vec<Peer> {
@@ -398,14 +660,21 @@ fn trigger_wireguard_probe(overlay_ipv4: &str) {
         return;
     }
 
-    let ping_bin = if std::path::Path::new("/usr/bin/ping").exists() {
+    let ping_bin = if cfg!(windows) {
+        "ping"
+    } else if std::path::Path::new("/usr/bin/ping").exists() {
         "/usr/bin/ping"
     } else {
         "ping"
     };
 
+    #[cfg(windows)]
+    let args = ["-n", "5", "-w", "1000", overlay_ipv4];
+    #[cfg(not(windows))]
+    let args = ["-c", "5", "-i", "0.2", "-W", "1", overlay_ipv4];
+
     if let Err(err) = Command::new(ping_bin)
-        .args(["-c", "1", "-W", "1", overlay_ipv4])
+        .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -685,19 +954,189 @@ fn describe_event_type(raw: i32) -> &'static str {
 
 impl AgentConfig {
     fn supports_runtime_wireguard(&self) -> bool {
-        matches!(self.os.as_str(), "linux" | "windows")
+        supports_runtime_wireguard_os(&self.os)
     }
+}
+
+fn load_stored_identity(config_path: &Path) -> Result<StoredIdentity> {
+    let state_path = state_path_for(config_path);
+    let raw = match fs::read_to_string(&state_path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(StoredIdentity::default()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("read state {}", state_path.display()));
+        }
+    };
+
+    serde_json::from_str(&raw).with_context(|| format!("parse state {}", state_path.display()))
+}
+
+fn save_stored_identity(config_path: &Path, identity: &StoredIdentity) -> Result<()> {
+    let state_path = state_path_for(config_path);
+    if let Some(parent) = state_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create state dir {}", parent.display()))?;
+    }
+
+    let payload = serde_json::to_vec_pretty(identity).context("serialize identity state")?;
+    fs::write(&state_path, payload)
+        .with_context(|| format!("write state {}", state_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&state_path, permissions)
+            .with_context(|| format!("chmod state {}", state_path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn state_path_for(config_path: &Path) -> PathBuf {
+    let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = config_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("meshlink");
+    parent.join(format!("{stem}.state.json"))
+}
+
+fn clean_option(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn generate_wireguard_keypair() -> StoredIdentity {
+    let private = StaticSecret::random_from_rng(OsRng);
+    let public = X25519PublicKey::from(&private);
+    StoredIdentity {
+        private_key: BASE64_STANDARD.encode(private.to_bytes()),
+        public_key: BASE64_STANDARD.encode(public.to_bytes()),
+    }
+}
+
+fn derive_public_key(private_key: &str) -> Result<String> {
+    let decoded = BASE64_STANDARD
+        .decode(private_key.trim())
+        .context("decode base64 wireguard private key")?;
+    let private_bytes: [u8; 32] = decoded
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("wireguard private key must be 32 bytes"))?;
+    let private = StaticSecret::from(private_bytes);
+    let public = X25519PublicKey::from(&private);
+    Ok(BASE64_STANDARD.encode(public.to_bytes()))
+}
+
+fn normalize_management_addr(raw: &str) -> String {
+    let trimmed = raw
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    if trimmed.is_empty() {
+        return format!("127.0.0.1:{}", default_management_port());
+    }
+
+    if has_explicit_port(trimmed) {
+        trimmed.to_string()
+    } else {
+        derive_service_addr(trimmed, default_management_port())
+    }
+}
+
+fn host_from_addr(addr: &str) -> String {
+    addr.rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(addr)
+        .to_string()
+}
+
+fn derive_service_addr(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
+
+fn has_explicit_port(addr: &str) -> bool {
+    if addr.starts_with('[') {
+        return addr.contains("]:");
+    }
+    match addr.matches(':').count() {
+        0 => false,
+        1 => addr
+            .rsplit_once(':')
+            .map(|(_, port)| port.chars().all(|value| value.is_ascii_digit()))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn supports_runtime_wireguard_os(os: &str) -> bool {
+    matches!(os, "linux" | "windows")
+}
+
+fn default_management_port() -> u16 {
+    33073
+}
+
+fn default_bootstrap_token() -> String {
+    "meshlink-dev-token".to_string()
+}
+
+fn default_listen_port() -> u16 {
+    51820
+}
+
+fn default_interface_name(os: &str) -> String {
+    match os {
+        "windows" => "MeshLink".to_string(),
+        _ => "sdwan0".to_string(),
+    }
+}
+
+fn default_node_name(public_key: &str) -> String {
+    hostname_from_env()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            let suffix = public_key.chars().take(8).collect::<String>();
+            format!("meshlink-{suffix}")
+        })
+}
+
+fn hostname_from_env() -> Option<String> {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("COMPUTERNAME")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_register_device_request, AgentConfig, CachedPeer, PeerCache};
+    use super::{
+        build_register_device_request, generate_wireguard_keypair, AgentConfig, CachedPeer,
+        PeerCache, RawAgentConfig,
+    };
     use api_client::proto::{OverlayAddress, PathType, Peer, SyncConfigEvent, SyncConfigEventType};
+    use std::fs;
     use std::time::Duration;
+    use tempfile::tempdir;
 
     #[test]
     fn agent_config_parses_optional_linux_fields() {
-        let config: AgentConfig = toml::from_str(
+        let identity = generate_wireguard_keypair();
+        let raw: RawAgentConfig = toml::from_str(&format!(
             r#"
 node_name = "client-a"
 management_addr = "127.0.0.1:33073"
@@ -706,14 +1145,18 @@ relay_addr = "127.0.0.1:3478"
 bootstrap_token = "meshlink-dev-token"
 public_key = "meshlink-client-a-public-key"
 interface_name = "sdwan0"
-private_key = "meshlink-client-a-private-key"
+private_key = "{private_key}"
 listen_port = 51820
 advertise_host = "192.0.2.10"
 advertised_routes = ["10.20.0.0/24", "10.30.0.0/24"]
 punch_timeout = "5s"
 "#,
-        )
+            private_key = identity.private_key
+        ))
         .expect("parse config");
+        let dir = tempdir().expect("temp dir");
+        let config_path = dir.path().join("client.toml");
+        let config = AgentConfig::from_raw(&config_path, raw).expect("finalize config");
 
         let endpoint = config
             .registration_direct_endpoint()
@@ -739,7 +1182,7 @@ punch_timeout = "5s"
 
     #[test]
     fn missing_linux_fields_leave_discovery_only_mode() {
-        let config: AgentConfig = toml::from_str(
+        let raw: RawAgentConfig = toml::from_str(
             r#"
 node_name = "client-a"
 management_addr = "127.0.0.1:33073"
@@ -749,6 +1192,9 @@ interface_name = "sdwan0"
 "#,
         )
         .expect("parse config");
+        let dir = tempdir().expect("temp dir");
+        let config_path = dir.path().join("client.toml");
+        let config = AgentConfig::from_raw(&config_path, raw).expect("finalize config");
 
         assert!(config.registration_direct_endpoint().is_none());
         assert!(config.linux_tunnel_settings().is_none());
@@ -756,7 +1202,7 @@ interface_name = "sdwan0"
 
     #[test]
     fn register_device_request_includes_advertised_routes() {
-        let config: AgentConfig = toml::from_str(
+        let raw: RawAgentConfig = toml::from_str(
             r#"
 node_name = "client-a"
 management_addr = "127.0.0.1:33073"
@@ -767,9 +1213,45 @@ advertised_routes = ["10.20.0.0/24"]
 "#,
         )
         .expect("parse config");
+        let dir = tempdir().expect("temp dir");
+        let config_path = dir.path().join("client.toml");
+        let config = AgentConfig::from_raw(&config_path, raw).expect("finalize config");
 
         let request = build_register_device_request(&config);
         assert_eq!(request.advertised_routes, vec!["10.20.0.0/24".to_string()]);
+    }
+
+    #[test]
+    fn minimal_config_auto_generates_identity_and_service_addrs() {
+        let dir = tempdir().expect("temp dir");
+        let config_path = dir.path().join("client.toml");
+        fs::write(&config_path, "management_addr = \"192.0.2.10\"\n").expect("write config");
+
+        let config = AgentConfig::load(&config_path).expect("load config");
+
+        assert_eq!(config.management_addr, "192.0.2.10:33073");
+        assert_eq!(config.signal_addr.as_deref(), Some("192.0.2.10:10000"));
+        assert_eq!(config.relay_addr.as_deref(), Some("192.0.2.10:3478"));
+        assert_eq!(config.stun_addr.as_deref(), Some("192.0.2.10:3479"));
+        assert_eq!(config.bootstrap_token, "meshlink-dev-token");
+        assert_eq!(config.interface_name, "sdwan0");
+        assert_eq!(config.listen_port, Some(51820));
+        assert!(config.private_key.is_some());
+        assert!(!config.public_key.is_empty());
+        assert!(config_path.with_file_name("client.state.json").exists());
+    }
+
+    #[test]
+    fn derived_identity_is_stable_across_reloads() {
+        let dir = tempdir().expect("temp dir");
+        let config_path = dir.path().join("client.toml");
+        fs::write(&config_path, "management_addr = \"192.0.2.10:33073\"\n").expect("write config");
+
+        let first = AgentConfig::load(&config_path).expect("first load");
+        let second = AgentConfig::load(&config_path).expect("second load");
+
+        assert_eq!(first.public_key, second.public_key);
+        assert_eq!(first.private_key, second.private_key);
     }
 
     #[test]

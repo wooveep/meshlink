@@ -511,6 +511,28 @@ wait_for_windows_peer_endpoint_host() {
   return 1
 }
 
+wait_for_windows_peer_endpoint() {
+  local public_key="$1"
+  local expected_endpoint="$2"
+  local attempts="${3:-40}"
+  local attempt=1
+
+  while (( attempt <= attempts )); do
+    local config_text endpoint
+    config_text="$(read_windows_file "$MESHLINK_WINDOWS_SERVICE_CONFIG_DIR\\$MESHLINK_WINDOWS_INTERFACE_NAME.conf" 2>/dev/null || true)"
+    endpoint="$(extract_peer_endpoint_from_conf "$config_text" "$public_key")"
+    if [[ -n "$endpoint" && "$endpoint" == "$expected_endpoint" ]]; then
+      printf '%s\n' "$endpoint"
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+
+  echo "timed out waiting for Windows peer $public_key endpoint $expected_endpoint" >&2
+  return 1
+}
+
 wait_for_windows_peer_allowed_ip_state() {
   local public_key="$1"
   local route="$2"
@@ -598,35 +620,6 @@ wait_for_windows_peer_overlay_ping_state() {
   done
 
   echo "timed out waiting for Windows overlay ping to peer $public_key to become ${expected_state}" >&2
-  return 1
-}
-
-linux_peer_endpoint() {
-  local node="$1"
-  local public_key="$2"
-  ssh_to_vm "$node" "sudo wg show ${MESHLINK_INTERFACE_NAME:-sdwan0} endpoints | awk '\$1 == \"${public_key}\" {print \$2; exit}'" 2>/dev/null || true
-}
-
-wait_for_linux_peer_endpoint_host() {
-  local node="$1"
-  local public_key="$2"
-  local expected_host="$3"
-  local attempts="${4:-40}"
-  local attempt=1
-
-  while (( attempt <= attempts )); do
-    local endpoint host
-    endpoint="$(linux_peer_endpoint "$node" "$public_key")"
-    host="${endpoint%:*}"
-    if [[ -n "$endpoint" && "$host" == "$expected_host" ]]; then
-      printf '%s\n' "$endpoint"
-      return 0
-    fi
-    sleep 2
-    attempt=$((attempt + 1))
-  done
-
-  echo "timed out waiting for ${node} peer endpoint host $expected_host" >&2
   return 1
 }
 
@@ -726,25 +719,26 @@ main() {
 
   "$ROOT_DIR/tests/windows-vm/prepare-dual-nat.sh" map >/dev/null
 
-  wait_for_linux_peer_endpoint_host "$DIRECT_NODE" "$WINDOWS_PUBLIC_KEY" "$WINDOWS_IP" 50 \
-    >"$VALIDATION_STATE_DIR/${DIRECT_NODE}-windows-direct-endpoint.txt"
-  wait_for_windows_peer_endpoint_host "$DIRECT_PEER_PUBLIC_KEY" "$DIRECT_EXPECTED_HOST" 50 \
+  wait_for_windows_peer_endpoint "$DIRECT_PEER_PUBLIC_KEY" "${DIRECT_EXPECTED_HOST}:${DIRECT_EXPECTED_PORT}" 50 \
     >"$VALIDATION_STATE_DIR/windows-direct-endpoint.txt"
+  wait_for_windows_peer_overlay_ping_state "$DIRECT_PEER_PUBLIC_KEY" present 25 \
+    >"$VALIDATION_STATE_DIR/windows-direct-overlay-peer.txt"
   RESULT_DIRECT="pass"
 
   "$ROOT_DIR/tests/windows-vm/prepare-dual-nat.sh" drop >/dev/null
 
   wait_for_windows_peer_endpoint_host "$RELAY_PEER_PUBLIC_KEY" "$MGMT_IP" 60 \
     >"$VALIDATION_STATE_DIR/windows-relay-endpoint.txt"
-  wait_for_linux_peer_endpoint_host "$RELAY_NODE" "$WINDOWS_PUBLIC_KEY" "$MGMT_IP" 60 \
-    >"$VALIDATION_STATE_DIR/${RELAY_NODE}-windows-relay-endpoint.txt"
+  wait_for_windows_peer_overlay_ping_state "$RELAY_PEER_PUBLIC_KEY" present 25 \
+    >"$VALIDATION_STATE_DIR/windows-relay-overlay-peer.txt"
   RESULT_RELAY="pass"
 
   "$ROOT_DIR/tests/windows-vm/prepare-dual-nat.sh" clear >/dev/null
 
-  wait_for_linux_peer_endpoint_host "$RELAY_NODE" "$WINDOWS_PUBLIC_KEY" "$WINDOWS_PUBLIC_IP" 90 \
-    >"$VALIDATION_STATE_DIR/${RELAY_NODE}-windows-recovery-linux-endpoint.txt"
-  printf '%s\n' "$WINDOWS_PUBLIC_IP" >"$VALIDATION_STATE_DIR/windows-recovery-endpoint.txt"
+  wait_for_windows_peer_endpoint "$RELAY_PEER_PUBLIC_KEY" "${RELAY_DIRECT_EXPECTED_HOST}:${RELAY_DIRECT_EXPECTED_PORT}" 90 \
+    >"$VALIDATION_STATE_DIR/windows-recovery-endpoint.txt"
+  wait_for_windows_peer_overlay_ping_state "$RELAY_PEER_PUBLIC_KEY" present 25 \
+    >"$VALIDATION_STATE_DIR/windows-recovery-overlay-peer.txt"
   RESULT_RECOVERY="pass"
 
   wait_for_windows_peer_allowed_ip_state "$ROUTE_ADVERTISER_PUBLIC_KEY" "$ROUTED_SUBNET" present 60 \
