@@ -78,7 +78,7 @@ copy_runtime() {
 }
 
 start_managementd() {
-  ssh_to_vm mgmt-1 "pkill -x managementd || true; rm -rf \$HOME/var/lib/meshlink; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
+  ssh_to_vm mgmt-1 "pkill -x managementd || true; rm -rf \$HOME/var/lib/meshlink ${REMOTE_ROOT}/var/lib/meshlink; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
 }
 
 start_client() {

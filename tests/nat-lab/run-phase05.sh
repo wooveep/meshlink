@@ -15,6 +15,7 @@ MESHLINK_SIGNAL_PORT="${MESHLINK_SIGNAL_PORT:-10000}"
 MESHLINK_RELAY_PORT="${MESHLINK_RELAY_PORT:-3478}"
 MESHLINK_STUN_PORT="${MESHLINK_STUN_PORT:-3479}"
 MESHLINK_PUNCH_TIMEOUT="${MESHLINK_PUNCH_TIMEOUT:-15s}"
+MESHLINK_CLIENT_RUNTIME_TIMEOUT="${MESHLINK_CLIENT_RUNTIME_TIMEOUT:-90s}"
 MESHLINK_CLIENT_A_WG_PORT="${MESHLINK_CLIENT_A_WG_PORT:-51820}"
 MESHLINK_CLIENT_B_WG_PORT="${MESHLINK_CLIENT_B_WG_PORT:-51821}"
 CLIENT_A_OVERLAY="100.64.0.1"
@@ -82,7 +83,7 @@ copy_runtime() {
 }
 
 start_managementd() {
-  ssh_to_vm mgmt-1 "sudo pkill -x managementd || true; rm -rf \$HOME/var/lib/meshlink; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
+  ssh_to_vm mgmt-1 "sudo pkill -x managementd || true; rm -rf \$HOME/var/lib/meshlink ${REMOTE_ROOT}/var/lib/meshlink; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
 }
 
 start_signald() {
@@ -95,7 +96,12 @@ start_relayd() {
 
 start_client() {
   local node="$1"
-  ssh_to_vm "$node" "sudo pkill -x meshlinkd || true; sudo ip link del ${MESHLINK_INTERFACE_NAME} 2>/dev/null || true; nohup sudo timeout 90s ${REMOTE_ROOT}/bin/meshlinkd --config ${REMOTE_ROOT}/config/client.toml > ${REMOTE_ROOT}/logs/meshlinkd.log 2>&1 < /dev/null &"
+  if [[ -n "$MESHLINK_CLIENT_RUNTIME_TIMEOUT" && "$MESHLINK_CLIENT_RUNTIME_TIMEOUT" != "0" ]]; then
+    ssh_to_vm "$node" "sudo pkill -x meshlinkd || true; sudo ip link del ${MESHLINK_INTERFACE_NAME} 2>/dev/null || true; nohup sudo timeout ${MESHLINK_CLIENT_RUNTIME_TIMEOUT} ${REMOTE_ROOT}/bin/meshlinkd --config ${REMOTE_ROOT}/config/client.toml > ${REMOTE_ROOT}/logs/meshlinkd.log 2>&1 < /dev/null &"
+    return
+  fi
+
+  ssh_to_vm "$node" "sudo pkill -x meshlinkd || true; sudo ip link del ${MESHLINK_INTERFACE_NAME} 2>/dev/null || true; nohup sudo ${REMOTE_ROOT}/bin/meshlinkd --config ${REMOTE_ROOT}/config/client.toml > ${REMOTE_ROOT}/logs/meshlinkd.log 2>&1 < /dev/null &"
 }
 
 wait_for_guest_tools() {

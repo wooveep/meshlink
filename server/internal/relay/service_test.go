@@ -150,6 +150,71 @@ func TestRelaySessionForwardsPacketsAfterLearningBothPeers(t *testing.T) {
 	}
 }
 
+func TestRelaySessionLearnsNatReboundSourcePort(t *testing.T) {
+	manager, err := NewManager(ManagerConfig{
+		SessionTTL:    10 * time.Second,
+		AdvertiseHost: "127.0.0.1",
+		UDPBindHost:   "127.0.0.1",
+	})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	session, err := manager.Reserve("dev-a", "dev-b", time.Now())
+	if err != nil {
+		t.Fatalf("reserve session: %v", err)
+	}
+	if _, err := manager.Reserve("dev-b", "dev-a", time.Now()); err != nil {
+		t.Fatalf("reserve peer session: %v", err)
+	}
+
+	left, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("listen left: %v", err)
+	}
+	right, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("listen right: %v", err)
+	}
+	defer right.Close()
+
+	target := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: int(session.Port())}
+	if _, err := left.WriteToUDP([]byte("left-old"), target); err != nil {
+		t.Fatalf("write left old: %v", err)
+	}
+	if _, err := right.WriteToUDP([]byte("right-hello"), target); err != nil {
+		t.Fatalf("write right hello: %v", err)
+	}
+	buffer := make([]byte, 64)
+	if err := left.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set left deadline: %v", err)
+	}
+	if _, _, err := left.ReadFromUDP(buffer); err != nil {
+		t.Fatalf("read right hello on left: %v", err)
+	}
+	left.Close()
+
+	reboundLeft, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("listen rebound left: %v", err)
+	}
+	defer reboundLeft.Close()
+	if _, err := reboundLeft.WriteToUDP([]byte("left-rebound"), target); err != nil {
+		t.Fatalf("write rebound left: %v", err)
+	}
+
+	if err := right.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set right deadline: %v", err)
+	}
+	n, _, err := right.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatalf("read rebound packet on right: %v", err)
+	}
+	if got := string(buffer[:n]); got != "left-rebound" {
+		t.Fatalf("unexpected forwarded payload on right: %q", got)
+	}
+}
+
 func TestServiceReserveAndReleaseValidateDeviceIdentity(t *testing.T) {
 	service, err := NewService(ServiceConfig{
 		BootstrapToken: "meshlink-dev-token",

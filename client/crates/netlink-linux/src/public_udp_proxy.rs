@@ -707,4 +707,16 @@ mod tests {
             .await
             .is_err());
     }
+
+    #[tokio::test]
+    async fn allocates_distinct_loopback_endpoints_for_multiple_peers() {
+        let mut proxy = PublicUdpProxy::bind(0).await.expect("bind proxy");
+        let peer_a = proxy.ensure_peer("peer-a").await.expect("ensure peer-a");
+        let peer_b = proxy.ensure_peer("peer-b").await.expect("ensure peer-b");
+
+        assert_ne!(peer_a.loopback_endpoint, peer_b.loopback_endpoint);
+        assert_ne!(peer_a.loopback_endpoint.port, peer_b.loopback_endpoint.port);
+
+        let _ = proxy.take_observation_rx();
+    }
 }

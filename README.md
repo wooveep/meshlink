@@ -2,7 +2,7 @@
 
 MeshLink 是一个基于 WireGuard 的分布式 SD-WAN 组网项目，目标是提供控制面与数据面分离的安全 Overlay 网络，并尽可能在复杂 NAT 与 IPv6 环境下实现自动直连。
 
-当前仓库已经从“可开工骨架”推进到“Linux Phase 06 完整闭环 + 静态路由发布已落地 + Embedded WireGuard Runtime 进行中”阶段，重点完成了以下内容：
+当前仓库已经推进到 `1.0.0` 发布准备阶段，覆盖 Linux 完整闭环、Relay fallback、静态路由发布、Embedded Windows Runtime 和 Web 管理台，重点完成了以下内容：
 
 1. Monorepo 目录结构
 2. 基于 gRPC 的 Phase 01 最小控制链路
@@ -120,10 +120,10 @@ go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.2
 安装与检查示例：
 
 ```bash
-sudo dpkg -i dist/deb/meshlink-managementd_0.1.0-1_amd64.deb
-sudo dpkg -i dist/deb/meshlink-client_0.1.0-1_amd64.deb
-dpkg-deb -I dist/deb/meshlink-managementd_0.1.0-1_amd64.deb
-dpkg-deb -c dist/deb/meshlink-client_0.1.0-1_amd64.deb
+sudo dpkg -i dist/deb/meshlink-managementd_1.0.0-1_amd64.deb
+sudo dpkg -i dist/deb/meshlink-client_1.0.0-1_amd64.deb
+dpkg-deb -I dist/deb/meshlink-managementd_1.0.0-1_amd64.deb
+dpkg-deb -c dist/deb/meshlink-client_1.0.0-1_amd64.deb
 systemctl status meshlink-managementd.service
 systemctl status meshlink-client.service
 ```

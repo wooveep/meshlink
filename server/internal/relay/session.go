@@ -15,7 +15,12 @@ type Session struct {
 	members       map[string]time.Time
 
 	mu      sync.RWMutex
-	learned map[string]*net.UDPAddr
+	learned map[string]learnedEndpoint
+}
+
+type learnedEndpoint struct {
+	addr     *net.UDPAddr
+	lastSeen time.Time
 }
 
 func newSession(id, advertiseHost string, conn *net.UDPConn, left, right string) *Session {
@@ -29,7 +34,7 @@ func newSession(id, advertiseHost string, conn *net.UDPConn, left, right string)
 			left:  time.Time{},
 			right: time.Time{},
 		},
-		learned: make(map[string]*net.UDPAddr),
+		learned: make(map[string]learnedEndpoint),
 	}
 
 	go session.forwardLoop()
@@ -112,34 +117,57 @@ func (s *Session) forwardLoop() {
 			return
 		}
 
-		target := s.learnSource(sourceAddr)
-		if target == nil {
+		targets := s.learnSource(sourceAddr, time.Now())
+		if len(targets) == 0 {
 			continue
 		}
-		_, _ = s.conn.WriteToUDP(buffer[:n], target)
+		for _, target := range targets {
+			_, _ = s.conn.WriteToUDP(buffer[:n], target)
+		}
 	}
 }
 
-func (s *Session) learnSource(sourceAddr *net.UDPAddr) *net.UDPAddr {
+func (s *Session) learnSource(sourceAddr *net.UDPAddr, now time.Time) []*net.UDPAddr {
 	sourceKey := sourceAddr.String()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.learned[sourceKey]; !ok {
-		if len(s.learned) >= 2 {
-			return nil
-		}
-		s.learned[sourceKey] = copyUDPAddr(sourceAddr)
+	s.learned[sourceKey] = learnedEndpoint{
+		addr:     copyUDPAddr(sourceAddr),
+		lastSeen: now,
 	}
+	s.pruneLearnedLocked(sourceKey)
 
-	for key, target := range s.learned {
+	targets := make([]*net.UDPAddr, 0, len(s.learned)-1)
+	for key, endpoint := range s.learned {
 		if key != sourceKey {
-			return copyUDPAddr(target)
+			targets = append(targets, copyUDPAddr(endpoint.addr))
 		}
 	}
 
-	return nil
+	return targets
+}
+
+func (s *Session) pruneLearnedLocked(protectedKey string) {
+	const maxLearnedEndpoints = 8
+	for len(s.learned) > maxLearnedEndpoints {
+		var oldestKey string
+		var oldestTime time.Time
+		for key, endpoint := range s.learned {
+			if key == protectedKey {
+				continue
+			}
+			if oldestKey == "" || endpoint.lastSeen.Before(oldestTime) {
+				oldestKey = key
+				oldestTime = endpoint.lastSeen
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(s.learned, oldestKey)
+	}
 }
 
 func copyUDPAddr(addr *net.UDPAddr) *net.UDPAddr {

@@ -9,7 +9,7 @@
 3. Windows 客户端：zip 包 + embedded tunnel-service runtime
 4. 管理台：`managementd` 提供的 `/admin/`
 
-当前手册基于仓库已完成状态编写，适用于 README 中描述的 “Linux 完整闭环 + Relay fallback + Route advertisement + Embedded Windows Runtime + Web 管理台” 阶段。
+当前手册基于 `1.0.0` 发布准备状态编写，适用于 README 中描述的 “Linux 完整闭环 + Relay fallback + Route advertisement + Embedded Windows Runtime + Web 管理台” 阶段。
 
 ## 2. 组件与职责
 
@@ -280,7 +280,7 @@ make package-windows
 输出示例：
 
 ```text
-dist/windows/x86_64-pc-windows-gnu/meshlink-client_0.1.0_x86_64-pc-windows-gnu.zip
+dist/windows/x86_64-pc-windows-gnu/meshlink-client_1.0.0_x86_64-pc-windows-gnu.zip
 ```
 
 #### 4.4.2 部署步骤

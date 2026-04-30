@@ -2,9 +2,9 @@
 
 ## Current milestone
 
-Control-plane delivery now includes static route publication over the existing
-peer view, and the embedded Linux and Windows runtime transition is validated
-end to end in the dual-NAT acceptance lab.
+MeshLink is preparing the `1.0.0` release with Linux and Windows deployment
+artifacts, install/deploy documentation, admin console packaging, static route
+publication, relay fallback, and embedded runtime validation paths.
 
 ## Completed
 
@@ -82,9 +82,11 @@ end to end in the dual-NAT acceptance lab.
     dual-NAT clients, and `run-phase08-validation.sh` provides a repeatable
     Windows VM acceptance path for package deployment, same-side direct
     peering, and opposite-side relay fallback.
-33. `run-phase08-validation.sh` now completes the full Windows embedded-runtime
+33. `run-phase08-validation.sh` now covers the full Windows embedded-runtime
     acceptance path: package refresh and QGA deploy, direct connectivity, relay
-    fallback, direct recovery, route advertisement, and route withdrawal.
+    fallback, direct recovery, route advertisement, and route withdrawal. This
+    path remains under TASK-029 stability hardening until it passes the
+    consecutive release gate.
 34. `run-phase08-routes.sh` now records guest runtime state alongside the Linux
     route regression so the guest path proves it no longer depends on
     `wireguard-tools`, while the host harness may still use local `wg` helpers
@@ -105,16 +107,26 @@ end to end in the dual-NAT acceptance lab.
 39. The server build and packaging flow now includes the Vue + Vite admin UI,
     embeds the built SPA into `managementd`, and publishes the admin console
     through the same binary.
+40. TASK-029 is now the 1.0.0 data-plane stability gate: `agent-core` tracks
+    explicit per-peer path state and generation-guarded punch attempts,
+    Windows endpoint-only updates fall back to service restart on runtime
+    update failure, and `run-stability-gate.sh` runs repeated Linux/Windows
+    acceptance rounds.
 
 ## Next
 
-1. Add ACL, policy, and more granular route-distribution controls on top of the
-   current route advertisement baseline.
-2. Add stronger admin-plane hardening such as OIDC/session rotation, CSRF
+1. Close TASK-029 by running
+   `MESHLINK_LAB_TOPOLOGY=dual-nat MESHLINK_STABILITY_RUNS=3 ./tests/nat-lab/run-stability-gate.sh`
+   and fixing any remaining Windows/Linux data-plane instability.
+2. Add group/site policy, hub/relay segmentation, ACLs, and more granular
+   route-distribution controls on top of the current route advertisement
+   baseline so larger deployments do not require unrestricted full-mesh
+   visibility.
+3. Add stronger admin-plane hardening such as OIDC/session rotation, CSRF
    handling, and multi-user audit attribution on top of the static-token v1.
-3. Improve observability, upgrade flow, and long-running stability coverage for
+4. Improve observability, upgrade flow, and long-running stability coverage for
    the embedded runtime path.
-4. Add targeted integration coverage for rolling upgrades where older clients
+5. Add targeted integration coverage for rolling upgrades where older clients
    still emit or consume legacy full-view incremental events.
 
 ## Risks
@@ -139,3 +151,6 @@ end to end in the dual-NAT acceptance lab.
    `MESHLINK_WINDOWS_BINARY`, plus staged runtime DLLs.
 8. The admin console currently relies on a static admin token and in-memory
    browser sessions; those sessions do not survive `managementd` restarts.
+9. Phase 08 functionality is implemented, but Windows/Linux data-plane release
+   confidence depends on repeated TASK-029 stability-gate passes in the local
+   dual-NAT lab.

@@ -15,6 +15,7 @@ MESHLINK_INTERFACE_NAME="${MESHLINK_INTERFACE_NAME:-sdwan0}"
 MESHLINK_SIGNAL_PORT="${MESHLINK_SIGNAL_PORT:-10000}"
 MESHLINK_STUN_PORT="${MESHLINK_STUN_PORT:-3479}"
 MESHLINK_RELAY_PORT="${MESHLINK_RELAY_PORT:-3478}"
+MESHLINK_CLIENT_RUNTIME_TIMEOUT="${MESHLINK_CLIENT_RUNTIME_TIMEOUT:-120s}"
 MESHLINK_CLIENT_A_WG_PORT="${MESHLINK_CLIENT_A_WG_PORT:-51820}"
 MESHLINK_CLIENT_B_WG_PORT="${MESHLINK_CLIENT_B_WG_PORT:-51821}"
 CLIENT_A_OVERLAY="100.64.0.1"
@@ -84,7 +85,7 @@ copy_client_runtime() {
 }
 
 start_managementd() {
-  ssh_to_vm mgmt-1 "sudo pkill -x managementd || true; rm -rf \$HOME/var/lib/meshlink; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
+  ssh_to_vm mgmt-1 "sudo pkill -x managementd || true; rm -rf \$HOME/var/lib/meshlink ${REMOTE_ROOT}/var/lib/meshlink; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
 }
 
 start_signald() {
@@ -97,7 +98,12 @@ start_relayd() {
 
 start_client() {
   local node="$1"
-  ssh_to_vm "$node" "sudo pkill -x meshlinkd || true; sudo ip link del ${MESHLINK_INTERFACE_NAME} 2>/dev/null || true; nohup sudo timeout 120s ${REMOTE_ROOT}/bin/meshlinkd --config ${REMOTE_ROOT}/config/client.toml > ${REMOTE_ROOT}/logs/meshlinkd.log 2>&1 < /dev/null &"
+  if [[ -n "$MESHLINK_CLIENT_RUNTIME_TIMEOUT" && "$MESHLINK_CLIENT_RUNTIME_TIMEOUT" != "0" ]]; then
+    ssh_to_vm "$node" "sudo pkill -x meshlinkd || true; sudo ip link del ${MESHLINK_INTERFACE_NAME} 2>/dev/null || true; nohup sudo timeout ${MESHLINK_CLIENT_RUNTIME_TIMEOUT} ${REMOTE_ROOT}/bin/meshlinkd --config ${REMOTE_ROOT}/config/client.toml > ${REMOTE_ROOT}/logs/meshlinkd.log 2>&1 < /dev/null &"
+    return
+  fi
+
+  ssh_to_vm "$node" "sudo pkill -x meshlinkd || true; sudo ip link del ${MESHLINK_INTERFACE_NAME} 2>/dev/null || true; nohup sudo ${REMOTE_ROOT}/bin/meshlinkd --config ${REMOTE_ROOT}/config/client.toml > ${REMOTE_ROOT}/logs/meshlinkd.log 2>&1 < /dev/null &"
 }
 
 wait_for_router_tools() {
@@ -157,6 +163,40 @@ wait_for_remote_log() {
   return 1
 }
 
+remote_log_count() {
+  local node="$1"
+  local path="$2"
+  local pattern="$3"
+
+  ssh_to_vm "$node" "grep -F -c '$pattern' '$path' 2>/dev/null || true" 2>/dev/null | tr -d '[:space:]'
+}
+
+wait_for_remote_log_count_greater() {
+  local node="$1"
+  local path="$2"
+  local pattern="$3"
+  local baseline="$4"
+  local attempts="${5:-40}"
+  local attempt=1
+
+  while (( attempt <= attempts )); do
+    local count=""
+    count="$(remote_log_count "$node" "$path" "$pattern")"
+    if [[ "${count:-0}" =~ ^[0-9]+$ ]] && (( count > baseline )); then
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+
+  echo "timed out waiting for log count on ${node}: ${pattern} > ${baseline}" >&2
+  return 1
+}
+
+linux_public_proxy_ready() {
+  ssh_to_vm client-a "grep -q 'linux public udp proxy ready' '${REMOTE_ROOT}/logs/meshlinkd.log'" >/dev/null 2>&1
+}
+
 wg_endpoint_for_peer() {
   local node="$1"
   local peer_public_key="$2"
@@ -204,6 +244,24 @@ wait_for_relay_endpoint() {
   done
 
   echo "timed out waiting for ${node} relay endpoint on host ${expected_host}" >&2
+  return 1
+}
+
+wait_for_overlay_ping() {
+  local node="$1"
+  local overlay_ip="$2"
+  local attempts="${3:-30}"
+  local attempt=1
+
+  while (( attempt <= attempts )); do
+    if ssh_to_vm "$node" "sudo ping -c 2 -W 2 ${overlay_ip} >/dev/null" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+
+  echo "timed out waiting for ${node} to ping ${overlay_ip}" >&2
   return 1
 }
 
@@ -271,11 +329,13 @@ wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "device registe
 wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "hole punch handshake observed" 50
 wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "hole punch handshake observed" 50
 
-wait_for_wg_endpoint client-a "$CLIENT_B_PUBLIC_KEY" "$MESHLINK_NAT_B_WAN_IP" "$MESHLINK_CLIENT_B_WG_PORT" 50
-wait_for_wg_endpoint client-b "$CLIENT_A_PUBLIC_KEY" "$MESHLINK_NAT_A_WAN_IP" "$MESHLINK_CLIENT_A_WG_PORT" 50
+if ! linux_public_proxy_ready; then
+  wait_for_wg_endpoint client-a "$CLIENT_B_PUBLIC_KEY" "$MESHLINK_NAT_B_WAN_IP" "$MESHLINK_CLIENT_B_WG_PORT" 50
+  wait_for_wg_endpoint client-b "$CLIENT_A_PUBLIC_KEY" "$MESHLINK_NAT_A_WAN_IP" "$MESHLINK_CLIENT_A_WG_PORT" 50
+fi
 
-ssh_to_vm client-a "sudo ping -c 2 -W 2 ${CLIENT_B_OVERLAY} >/dev/null"
-ssh_to_vm client-b "sudo ping -c 2 -W 2 ${CLIENT_A_OVERLAY} >/dev/null"
+wait_for_overlay_ping client-a "$CLIENT_B_OVERLAY" 30
+wait_for_overlay_ping client-b "$CLIENT_A_OVERLAY" 30
 
 collect_router_state nat-a direct
 collect_router_state nat-b direct
@@ -287,26 +347,37 @@ collect_router_state nat-b blocked
 wait_for_remote_log client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "relay fallback activated" 50
 wait_for_remote_log client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "relay fallback activated" 50
 
-CLIENT_A_RELAY_ENDPOINT="$(wait_for_relay_endpoint client-a "$CLIENT_B_PUBLIC_KEY" "$MGMT_IP" 50)"
-CLIENT_B_RELAY_ENDPOINT="$(wait_for_relay_endpoint client-b "$CLIENT_A_PUBLIC_KEY" "$MGMT_IP" 50)"
+if linux_public_proxy_ready; then
+  wait_for_remote_log mgmt-1 "${REMOTE_ROOT}/logs/relayd.log" "relay reservation active" 50
+else
+  CLIENT_A_RELAY_ENDPOINT="$(wait_for_relay_endpoint client-a "$CLIENT_B_PUBLIC_KEY" "$MGMT_IP" 50)"
+  CLIENT_B_RELAY_ENDPOINT="$(wait_for_relay_endpoint client-b "$CLIENT_A_PUBLIC_KEY" "$MGMT_IP" 50)"
 
-if [[ "${CLIENT_A_RELAY_ENDPOINT#*:}" != "${CLIENT_B_RELAY_ENDPOINT#*:}" ]]; then
-  echo "relay endpoints differ between clients: ${CLIENT_A_RELAY_ENDPOINT} vs ${CLIENT_B_RELAY_ENDPOINT}" >&2
-  exit 1
+  if [[ "${CLIENT_A_RELAY_ENDPOINT#*:}" != "${CLIENT_B_RELAY_ENDPOINT#*:}" ]]; then
+    echo "relay endpoints differ between clients: ${CLIENT_A_RELAY_ENDPOINT} vs ${CLIENT_B_RELAY_ENDPOINT}" >&2
+    exit 1
+  fi
 fi
 
-ssh_to_vm client-a "sudo ping -c 2 -W 2 ${CLIENT_B_OVERLAY} >/dev/null"
-ssh_to_vm client-b "sudo ping -c 2 -W 2 ${CLIENT_A_OVERLAY} >/dev/null"
+wait_for_overlay_ping client-a "$CLIENT_B_OVERLAY" 30
+wait_for_overlay_ping client-b "$CLIENT_A_OVERLAY" 30
 
 clear_phase06_drop_rules
 collect_router_state nat-a cleared
 collect_router_state nat-b cleared
 
-wait_for_wg_endpoint client-a "$CLIENT_B_PUBLIC_KEY" "$MESHLINK_NAT_B_WAN_IP" "$MESHLINK_CLIENT_B_WG_PORT" 50
-wait_for_wg_endpoint client-b "$CLIENT_A_PUBLIC_KEY" "$MESHLINK_NAT_A_WAN_IP" "$MESHLINK_CLIENT_A_WG_PORT" 50
+if linux_public_proxy_ready; then
+  CLIENT_A_DIRECT_COUNT="$(remote_log_count client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "hole punch handshake observed")"
+  CLIENT_B_DIRECT_COUNT="$(remote_log_count client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "hole punch handshake observed")"
+  wait_for_remote_log_count_greater client-a "${REMOTE_ROOT}/logs/meshlinkd.log" "hole punch handshake observed" "${CLIENT_A_DIRECT_COUNT:-0}" 50
+  wait_for_remote_log_count_greater client-b "${REMOTE_ROOT}/logs/meshlinkd.log" "hole punch handshake observed" "${CLIENT_B_DIRECT_COUNT:-0}" 50
+else
+  wait_for_wg_endpoint client-a "$CLIENT_B_PUBLIC_KEY" "$MESHLINK_NAT_B_WAN_IP" "$MESHLINK_CLIENT_B_WG_PORT" 50
+  wait_for_wg_endpoint client-b "$CLIENT_A_PUBLIC_KEY" "$MESHLINK_NAT_A_WAN_IP" "$MESHLINK_CLIENT_A_WG_PORT" 50
+fi
 
-ssh_to_vm client-a "sudo ping -c 2 -W 2 ${CLIENT_B_OVERLAY} >/dev/null"
-ssh_to_vm client-b "sudo ping -c 2 -W 2 ${CLIENT_A_OVERLAY} >/dev/null"
+wait_for_overlay_ping client-a "$CLIENT_B_OVERLAY" 30
+wait_for_overlay_ping client-b "$CLIENT_A_OVERLAY" 30
 
 collect_log mgmt-1 "${REMOTE_ROOT}/logs/managementd.log"
 collect_log mgmt-1 "${REMOTE_ROOT}/logs/signald.log"

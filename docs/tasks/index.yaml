@@ -486,3 +486,40 @@ tasks:
     acceptance: build, systemd, docker-compose, and docs all describe and expose the managementd admin console entrypoint
     verification: ./scripts/build-server.sh && cd server && go test ./...
     updated_at: "2026-04-18T20:30:00+08:00"
+  - id: TASK-028
+    title: Add group/site policy and hub/relay segmentation
+    phase: phase-09-policy-and-scale
+    status: todo
+    priority: P1
+    depends_on:
+      - TASK-027
+    owner: server
+    doc: docs/tasks/remaining-work.md
+    repo_paths:
+      - proto/common.proto
+      - proto/management.proto
+      - server/internal/app
+      - server/internal/peer
+      - client/crates/agent-core
+      - docs/architecture
+    acceptance: Management policy can scope peer visibility by group/site, support explicit hub or relay-only domains, and prevent accidental transitive route propagation while preserving the existing full-mesh behavior as the default compatibility mode
+    verification: cd server && go test ./... && cargo test --manifest-path client/Cargo.toml --workspace
+    updated_at: "2026-04-28T23:00:00+08:00"
+  - id: TASK-029
+    title: Harden Windows and Linux data-plane stability before 1.0.0
+    phase: phase-08-embedded-wireguard-runtime
+    status: in_progress
+    priority: P0
+    depends_on:
+      - TASK-021
+    owner: client
+    doc: docs/tasks/phase-08-embedded-wireguard-runtime.md
+    repo_paths:
+      - client/crates/agent-core
+      - client/crates/netlink-linux
+      - client/crates/wintun-windows
+      - tests/nat-lab
+      - tests/windows-vm
+    acceptance: Linux and Windows data-plane acceptance passes the stability gate for direct, relay fallback, direct recovery, route add/remove, and 300-second bidirectional iperf3 without interface flapping
+    verification: MESHLINK_LAB_TOPOLOGY=dual-nat MESHLINK_STABILITY_RUNS=3 ./tests/nat-lab/run-stability-gate.sh
+    updated_at: "2026-04-29T00:00:00+08:00"

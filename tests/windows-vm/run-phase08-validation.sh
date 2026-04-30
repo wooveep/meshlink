@@ -10,6 +10,9 @@ MESHLINK_WINDOWS_LOG_LEVEL="${MESHLINK_WINDOWS_LOG_LEVEL:-debug}"
 MESHLINK_WINDOWS_PUNCH_TIMEOUT="${MESHLINK_WINDOWS_PUNCH_TIMEOUT:-5s}"
 MESHLINK_WINDOWS_PACKAGE_DIR="${MESHLINK_WINDOWS_PACKAGE_DIR:-C:\\MeshLink}"
 MESHLINK_WINDOWS_SERVICE_CONFIG_DIR="${MESHLINK_WINDOWS_SERVICE_CONFIG_DIR:-C:\\ProgramData\\MeshLink}"
+MESHLINK_WINDOWS_LINUX_CLIENT_TIMEOUT="${MESHLINK_WINDOWS_LINUX_CLIENT_TIMEOUT:-2400s}"
+MESHLINK_WINDOWS_IPERF_DURATION="${MESHLINK_WINDOWS_IPERF_DURATION:-300}"
+MESHLINK_WINDOWS_IPERF_PORT="${MESHLINK_WINDOWS_IPERF_PORT:-5201}"
 
 # shellcheck disable=SC1091
 source "$ROOT_DIR/tests/nat-lab/common.sh"
@@ -27,6 +30,7 @@ RESULT_RELAY="pending"
 RESULT_RECOVERY="pending"
 RESULT_ROUTE_ADV="pending"
 RESULT_ROUTE_WITHDRAW="pending"
+RESULT_IPERF="pending"
 WINDOWS_PRIVATE_KEY=""
 WINDOWS_PUBLIC_KEY=""
 
@@ -38,7 +42,7 @@ load_windows_env() {
 }
 
 require_local_commands() {
-  require_commands virsh ssh scp wg iconv base64 grep awk sed mktemp
+  require_commands virsh ssh scp wg iconv base64 grep awk sed mktemp go cargo
   command -v jq >/dev/null 2>&1 || {
     echo "jq is required" >&2
     exit 1
@@ -154,7 +158,7 @@ update_linux_client_routes() {
 
 restart_linux_client() {
   local node="$1"
-  ssh_to_vm "$node" "sudo pkill -x meshlinkd || true; sudo ip link del ${MESHLINK_INTERFACE_NAME:-sdwan0} 2>/dev/null || true; nohup sudo timeout 180s $REMOTE_ROOT/bin/meshlinkd --config $REMOTE_ROOT/config/client.toml > $REMOTE_ROOT/logs/meshlinkd.log 2>&1 < /dev/null &"
+  ssh_to_vm "$node" "sudo pkill -x meshlinkd || true; sudo ip link del ${MESHLINK_INTERFACE_NAME:-sdwan0} 2>/dev/null || true; nohup sudo timeout ${MESHLINK_WINDOWS_LINUX_CLIENT_TIMEOUT} $REMOTE_ROOT/bin/meshlinkd --config $REMOTE_ROOT/config/client.toml > $REMOTE_ROOT/logs/meshlinkd.log 2>&1 < /dev/null &"
 }
 
 stop_linux_client() {
@@ -163,7 +167,7 @@ stop_linux_client() {
 }
 
 start_managementd() {
-  ssh_to_vm mgmt-1 "sudo pkill -x managementd || true; rm -rf \$HOME/var/lib/meshlink; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
+  ssh_to_vm mgmt-1 "sudo pkill -x managementd || true; rm -rf \$HOME/var/lib/meshlink ${REMOTE_ROOT}/var/lib/meshlink; nohup ${REMOTE_ROOT}/bin/managementd -listen 0.0.0.0:${MESHLINK_MANAGEMENT_PORT} -sync-interval ${MESHLINK_SYNC_INTERVAL} > ${REMOTE_ROOT}/logs/managementd.log 2>&1 < /dev/null &"
 }
 
 start_signald() {
@@ -211,6 +215,44 @@ wait_for_remote_log() {
   return 1
 }
 
+ensure_linux_iperf3() {
+  local node="$1"
+
+  if ssh_to_vm "$node" "command -v iperf3 >/dev/null 2>&1" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  ssh_to_vm "$node" "sudo DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iperf3 >/dev/null"
+}
+
+build_linux_runtime_artifacts() {
+  mkdir -p "$MESHLINK_LAB_STATE_DIR/runtime/bin"
+  (
+    cd "$ROOT_DIR/server"
+    go build -ldflags="-s -w" -o "$MESHLINK_LAB_STATE_DIR/runtime/bin/managementd" ./cmd/managementd
+    go build -ldflags="-s -w" -o "$MESHLINK_LAB_STATE_DIR/runtime/bin/signald" ./cmd/signald
+    go build -ldflags="-s -w" -o "$MESHLINK_LAB_STATE_DIR/runtime/bin/relayd" ./cmd/relayd
+  )
+  cargo build --release --manifest-path "$ROOT_DIR/client/Cargo.toml" --bin meshlinkd >/dev/null
+  cp "$ROOT_DIR/client/target/release/meshlinkd" "$MESHLINK_LAB_STATE_DIR/runtime/bin/meshlinkd"
+  strip "$MESHLINK_LAB_STATE_DIR/runtime/bin/meshlinkd" 2>/dev/null || true
+}
+
+deploy_linux_runtime_artifacts() {
+  ssh_to_vm mgmt-1 "mkdir -p ${REMOTE_ROOT}/bin ${REMOTE_ROOT}/logs && sudo pkill -x managementd || true && sudo pkill -x signald || true && sudo pkill -x relayd || true && rm -f ${REMOTE_ROOT}/bin/*.new"
+  scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/managementd" mgmt-1 "${REMOTE_ROOT}/bin/managementd.new"
+  scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/signald" mgmt-1 "${REMOTE_ROOT}/bin/signald.new"
+  scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/relayd" mgmt-1 "${REMOTE_ROOT}/bin/relayd.new"
+  ssh_to_vm mgmt-1 "mv -f ${REMOTE_ROOT}/bin/managementd.new ${REMOTE_ROOT}/bin/managementd && mv -f ${REMOTE_ROOT}/bin/signald.new ${REMOTE_ROOT}/bin/signald && mv -f ${REMOTE_ROOT}/bin/relayd.new ${REMOTE_ROOT}/bin/relayd"
+
+  for node in client-a client-b; do
+    wait_for_ssh "$node" 30
+    ssh_to_vm "$node" "mkdir -p ${REMOTE_ROOT}/bin ${REMOTE_ROOT}/config ${REMOTE_ROOT}/logs && sudo pkill -x meshlinkd || true && rm -f ${REMOTE_ROOT}/bin/meshlinkd.new"
+    scp_to_vm "$MESHLINK_LAB_STATE_DIR/runtime/bin/meshlinkd" "$node" "${REMOTE_ROOT}/bin/meshlinkd.new"
+    ssh_to_vm "$node" "mv -f ${REMOTE_ROOT}/bin/meshlinkd.new ${REMOTE_ROOT}/bin/meshlinkd"
+  done
+}
+
 ensure_linux_clients_ready() {
   wait_for_ssh mgmt-1 30
   ssh_to_vm mgmt-1 "mkdir -p ${REMOTE_ROOT}/logs"
@@ -231,6 +273,7 @@ ensure_linux_clients_ready() {
 
   for node in client-a client-b; do
     wait_for_ssh "$node" 30
+    ensure_linux_iperf3 "$node"
     ensure_linux_client_relay_config "$node"
   done
 
@@ -246,6 +289,22 @@ ensure_linux_clients_ready() {
 refresh_windows_package() {
   "$ROOT_DIR/tests/windows-vm/check-package.sh"
   "$ROOT_DIR/tests/windows-vm/refresh-package-iso.sh"
+}
+
+stage_windows_files_via_qga() {
+  windows_ps_script "New-Item -ItemType Directory -Path '$MESHLINK_WINDOWS_PACKAGE_DIR' -Force | Out-Null"
+
+  if [[ -n "${MESHLINK_WINDOWS_PACKAGE:-}" && -f "$MESHLINK_WINDOWS_PACKAGE" ]]; then
+    windows_qga write "$MESHLINK_WINDOWS_PACKAGE" "C:\\MESHLINK.ZIP"
+  fi
+
+  if [[ -f "${MESHLINK_WINDOWS_SHARE_DIR:-}/iperf3.exe" ]]; then
+    windows_qga write "${MESHLINK_WINDOWS_SHARE_DIR}/iperf3.exe" "$MESHLINK_WINDOWS_PACKAGE_DIR\\iperf3.exe"
+  fi
+
+  if [[ -f "${MESHLINK_WINDOWS_SHARE_DIR:-}/cygwin1.dll" ]]; then
+    windows_qga write "${MESHLINK_WINDOWS_SHARE_DIR}/cygwin1.dll" "$MESHLINK_WINDOWS_PACKAGE_DIR\\cygwin1.dll"
+  fi
 }
 
 deploy_windows_package() {
@@ -329,18 +388,84 @@ restart_windows_meshlinkd() {
 
   script="$(cat <<EOF
 \$ErrorActionPreference = "Stop"
-if (Get-Service -Name 'WireGuardTunnel\$${MESHLINK_WINDOWS_INTERFACE_NAME}' -ErrorAction SilentlyContinue) {
-  Stop-Service -Name 'WireGuardTunnel\$${MESHLINK_WINDOWS_INTERFACE_NAME}' -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Seconds 2
+\$tunnelService = 'WireGuardTunnel\$${MESHLINK_WINDOWS_INTERFACE_NAME}'
+if (Get-Service -Name \$tunnelService -ErrorAction SilentlyContinue) {
+  Stop-Service -Name \$tunnelService -Force -ErrorAction SilentlyContinue
+  for (\$i = 0; \$i -lt 20; \$i++) {
+    \$svc = Get-Service -Name \$tunnelService -ErrorAction SilentlyContinue
+    if (-not \$svc -or \$svc.Status -eq 'Stopped') { break }
+    Start-Sleep -Milliseconds 500
+  }
 }
-Get-Process meshlinkd -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Seconds 2
+\$existing = @(Get-Process meshlinkd -ErrorAction SilentlyContinue)
+if (\$existing.Count -gt 0) {
+  \$existing | Stop-Process -Force
+  for (\$i = 0; \$i -lt 20; \$i++) {
+    if (-not (Get-Process meshlinkd -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 500
+  }
+}
+if (Get-Process meshlinkd -ErrorAction SilentlyContinue) {
+  throw "stale meshlinkd process is still running"
+}
 Remove-Item "$MESHLINK_WINDOWS_PACKAGE_DIR\\meshlinkd.stdout.log","$MESHLINK_WINDOWS_PACKAGE_DIR\\meshlinkd.stderr.log" -Force -ErrorAction SilentlyContinue
-Start-Process -FilePath "$MESHLINK_WINDOWS_PACKAGE_DIR\\meshlinkd.exe" -ArgumentList "--config","$MESHLINK_WINDOWS_PACKAGE_DIR\\client.toml" -WorkingDirectory "$MESHLINK_WINDOWS_PACKAGE_DIR" -WindowStyle Hidden
+\$launcher = "$MESHLINK_WINDOWS_PACKAGE_DIR\\run-meshlinkd.cmd"
+\$launcherContent = @'
+@echo off
+cd /d "$MESHLINK_WINDOWS_PACKAGE_DIR"
+"$MESHLINK_WINDOWS_PACKAGE_DIR\\meshlinkd.exe" --config "$MESHLINK_WINDOWS_PACKAGE_DIR\\client.toml" >> "$MESHLINK_WINDOWS_PACKAGE_DIR\\meshlinkd.stdout.log" 2>> "$MESHLINK_WINDOWS_PACKAGE_DIR\\meshlinkd.stderr.log"
+'@
+Set-Content -Path \$launcher -Value \$launcherContent -Encoding ASCII
+\$started = Start-Process -FilePath "cmd.exe" -ArgumentList "/d","/c",\$launcher -WorkingDirectory "$MESHLINK_WINDOWS_PACKAGE_DIR" -WindowStyle Hidden -PassThru
 Start-Sleep -Seconds 4
-if (-not (Get-Process meshlinkd -ErrorAction SilentlyContinue)) {
+\$running = @(Get-Process meshlinkd -ErrorAction SilentlyContinue)
+if (\$running.Count -eq 0) {
   throw "meshlinkd did not start"
 }
+\$foreground = @(Get-CimInstance Win32_Process -Filter "name='meshlinkd.exe'" | Where-Object { \$_.CommandLine -notmatch ' /service ' })
+if (\$foreground.Count -ne 1) {
+  throw ("expected exactly one foreground meshlinkd process, found {0}" -f \$foreground.Count)
+}
+EOF
+)"
+
+  windows_ps_script "$script"
+}
+
+ensure_windows_iperf3() {
+  local script
+
+  script="$(cat <<EOF
+\$ErrorActionPreference = "Stop"
+\$packageDir = "$MESHLINK_WINDOWS_PACKAGE_DIR"
+\$target = Join-Path \$packageDir "iperf3.exe"
+\$source = \$null
+foreach (\$drive in (Get-PSDrive -PSProvider FileSystem)) {
+  \$candidate = Join-Path \$drive.Root "iperf3.exe"
+  if ((Test-Path -LiteralPath \$candidate) -and (\$candidate -ne \$target)) {
+    \$source = \$candidate
+    break
+  }
+}
+if (-not (Test-Path -LiteralPath \$target)) {
+  if (-not \$source) {
+    throw "iperf3.exe not found. Put iperf3.exe on the shared drive, for example Z:\\iperf3.exe."
+  }
+  Copy-Item -LiteralPath \$source -Destination \$target -Force
+}
+\$sourceDir = if (\$source) { Split-Path -Parent \$source } else { \$null }
+if (\$sourceDir -and (Test-Path -LiteralPath \$sourceDir)) {
+  Get-ChildItem -Path \$sourceDir -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+    Copy-Item -LiteralPath \$_.FullName -Destination (Join-Path \$packageDir \$_.Name) -Force
+  }
+}
+if (-not (Test-Path -LiteralPath (Join-Path \$packageDir "cygwin1.dll"))) {
+  throw "cygwin1.dll not found. Put cygwin1.dll next to iperf3.exe on the shared drive."
+}
+if (-not (Get-NetFirewallRule -DisplayName "MeshLink iperf3" -ErrorAction SilentlyContinue)) {
+  New-NetFirewallRule -DisplayName "MeshLink iperf3" -Direction Inbound -Action Allow -Program \$target -Protocol TCP -LocalPort $MESHLINK_WINDOWS_IPERF_PORT | Out-Null
+}
+& \$target --version | Select-Object -First 1
 EOF
 )"
 
@@ -404,8 +529,43 @@ wait_for_windows_service_running() {
 wait_for_windows_interface_ready() {
   wait_for_windows_powershell_success \
     "overlay interface ready" \
-    "\$adapter = Get-NetAdapter -Name '$MESHLINK_WINDOWS_INTERFACE_NAME' -ErrorAction Stop; if (\$adapter.Status -ne 'Up') { throw 'interface not up' }; Get-NetIPAddress -InterfaceAlias '$MESHLINK_WINDOWS_INTERFACE_NAME' -AddressFamily IPv4 -ErrorAction Stop | Select-Object IPAddress,PrefixLength | Format-Table -HideTableHeaders" \
+    "\$adapter = Get-NetAdapter -Name '$MESHLINK_WINDOWS_INTERFACE_NAME' -ErrorAction Stop; if (\$adapter.Status -ne 'Up') { throw 'interface not up' }; \$addresses = Get-NetIPAddress -InterfaceAlias '$MESHLINK_WINDOWS_INTERFACE_NAME' -AddressFamily IPv4 -ErrorAction Stop; \$addr = \$addresses | Where-Object AddressState -eq 'Preferred' | Select-Object -First 1; if (-not \$addr) { throw ('interface address state is ' + ((\$addresses | Select-Object -ExpandProperty AddressState) -join ',')) }; \$addr | Select-Object IPAddress,PrefixLength,AddressState | Format-Table -HideTableHeaders" \
     "${1:-40}"
+}
+
+wait_for_linux_client_running() {
+  local node="$1"
+  local attempts="${2:-40}"
+  local attempt=1
+
+  while (( attempt <= attempts )); do
+    if ssh_to_vm "$node" "pgrep -x meshlinkd >/dev/null" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+
+  echo "timed out waiting for ${node} meshlinkd to remain running" >&2
+  return 1
+}
+
+wait_for_linux_public_proxy_listener() {
+  local node="$1"
+  local port="$2"
+  local attempts="${3:-40}"
+  local attempt=1
+
+  while (( attempt <= attempts )); do
+    if ssh_to_vm "$node" "sudo ss -H -lunp | grep -Eq '[:.]${port}[[:space:]]'" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+
+  echo "timed out waiting for ${node} UDP listener on ${port}" >&2
+  return 1
 }
 
 wait_for_windows_service_config() {
@@ -589,7 +749,7 @@ wait_for_windows_ping_state() {
   if [[ "$expected_state" == "present" ]]; then
     wait_for_windows_powershell_success \
       "Windows reachability to ${target}" \
-      "if (-not (Test-Connection -ComputerName '$target' -Count 2 -Quiet)) { throw 'target unreachable' }; 'reachable'" \
+      "\$addresses = Get-NetIPAddress -InterfaceAlias '$MESHLINK_WINDOWS_INTERFACE_NAME' -AddressFamily IPv4 -ErrorAction Stop; \$addr = \$addresses | Where-Object AddressState -eq 'Preferred' | Select-Object -First 1; if (-not \$addr) { throw ('interface address state is ' + ((\$addresses | Select-Object -ExpandProperty AddressState) -join ',')) }; if (-not (Test-Connection -ComputerName '$target' -Count 2 -Quiet)) { throw 'target unreachable' }; 'reachable'" \
       "$attempts" >/dev/null
   else
     wait_for_windows_powershell_success \
@@ -597,6 +757,49 @@ wait_for_windows_ping_state() {
       "if (Test-Connection -ComputerName '$target' -Count 1 -Quiet) { throw 'target still reachable' }" \
       "$attempts" >/dev/null
   fi
+}
+
+windows_overlay_ip() {
+  windows_ps_script "\$addr = Get-NetIPAddress -InterfaceAlias '$MESHLINK_WINDOWS_INTERFACE_NAME' -AddressFamily IPv4 -ErrorAction Stop | Where-Object AddressState -eq 'Preferred' | Select-Object -First 1 -ExpandProperty IPAddress; if (-not \$addr) { throw 'preferred overlay address missing' }; \$addr" |
+    tr -d '\r' |
+    awk 'NF {print; exit}'
+}
+
+run_bidirectional_iperf3() {
+  local linux_node="$1"
+  local linux_overlay_ip="$2"
+  local windows_ip="$3"
+  local duration="$MESHLINK_WINDOWS_IPERF_DURATION"
+  local port="$MESHLINK_WINDOWS_IPERF_PORT"
+  local iperf_timeout=$((duration + 30))
+  local linux_server_log="$REMOTE_ROOT/logs/iperf3-${linux_node}-server.log"
+  local attempt
+
+  wait_for_windows_interface_ready 60 >/dev/null
+  wait_for_windows_ping_state "$linux_overlay_ip" present 30
+  for attempt in 1 2; do
+    ssh_to_vm "$linux_node" "pkill -x iperf3 2>/dev/null || true; rm -f '$linux_server_log'; nohup iperf3 -s -1 -p '$port' > '$linux_server_log' 2>&1 < /dev/null &"
+    sleep 2
+    wait_for_windows_ping_state "$linux_overlay_ip" present 15
+    if windows_ps_script "\$ErrorActionPreference = 'Stop'; & '$MESHLINK_WINDOWS_PACKAGE_DIR\\iperf3.exe' -c '$linux_overlay_ip' -p '$port' -t '$duration' --json" \
+      >"$VALIDATION_STATE_DIR/iperf3-windows-to-${linux_node}.json"; then
+      break
+    fi
+    cp "$VALIDATION_STATE_DIR/iperf3-windows-to-${linux_node}.json" \
+      "$VALIDATION_STATE_DIR/iperf3-windows-to-${linux_node}.attempt-${attempt}.json" 2>/dev/null || true
+    if (( attempt == 2 )); then
+      return 1
+    fi
+    sleep 5
+  done
+  ssh_to_vm "$linux_node" "cat '$linux_server_log'" \
+    >"$VALIDATION_STATE_DIR/iperf3-${linux_node}-server-windows-client.log" 2>/dev/null || true
+
+  windows_ps_script "\$ErrorActionPreference = 'Stop'; Get-Process iperf3 -ErrorAction SilentlyContinue | Stop-Process -Force; Remove-Item '$MESHLINK_WINDOWS_PACKAGE_DIR\\iperf3-server.stdout.log','$MESHLINK_WINDOWS_PACKAGE_DIR\\iperf3-server.stderr.log' -Force -ErrorAction SilentlyContinue; Start-Process -FilePath '$MESHLINK_WINDOWS_PACKAGE_DIR\\iperf3.exe' -ArgumentList '-s','-1','-p','$port','--logfile','$MESHLINK_WINDOWS_PACKAGE_DIR\\iperf3-server.stdout.log' -WorkingDirectory '$MESHLINK_WINDOWS_PACKAGE_DIR' -WindowStyle Hidden; Start-Sleep -Seconds 2; if (-not (Get-Process iperf3 -ErrorAction SilentlyContinue)) { throw 'iperf3 server did not start' }"
+  ssh_to_vm "$linux_node" "timeout '$iperf_timeout' iperf3 -c '$windows_ip' -p '$port' -t '$duration' --json" \
+    >"$VALIDATION_STATE_DIR/iperf3-${linux_node}-to-windows.json"
+  windows_ps_script "Get-Content -Path '$MESHLINK_WINDOWS_PACKAGE_DIR\\iperf3-server.stdout.log' -Raw -ErrorAction SilentlyContinue" \
+    >"$VALIDATION_STATE_DIR/iperf3-windows-server-${linux_node}-client.log" 2>/dev/null || true
 }
 
 wait_for_windows_peer_overlay_ping_state() {
@@ -649,6 +852,8 @@ collect_validation_artifacts() {
   ssh_to_vm client-b "sudo ip route show" >"$VALIDATION_STATE_DIR/client-b-routes.txt" 2>/dev/null || true
   ssh_to_vm client-a "cat $REMOTE_ROOT/config/client.toml" >"$VALIDATION_STATE_DIR/client-a.toml" 2>/dev/null || true
   ssh_to_vm client-b "cat $REMOTE_ROOT/config/client.toml" >"$VALIDATION_STATE_DIR/client-b.toml" 2>/dev/null || true
+  windows_ps_script "Get-Content -Path '$MESHLINK_WINDOWS_PACKAGE_DIR\\iperf3-server.stdout.log' -Raw -ErrorAction SilentlyContinue" \
+    >"$VALIDATION_STATE_DIR/iperf3-windows-server-final.log" 2>/dev/null || true
 }
 
 print_summary() {
@@ -656,6 +861,7 @@ print_summary() {
   printf 'direct: %s\n' "$RESULT_DIRECT"
   printf 'relay fallback: %s\n' "$RESULT_RELAY"
   printf 'direct recovery: %s\n' "$RESULT_RECOVERY"
+  printf 'iperf3 bidirectional: %s\n' "$RESULT_IPERF"
   printf 'route advertisement: %s\n' "$RESULT_ROUTE_ADV"
   printf 'route withdrawal: %s\n' "$RESULT_ROUTE_WITHDRAW"
   printf 'artifacts: %s\n' "$VALIDATION_STATE_DIR"
@@ -665,6 +871,9 @@ cleanup_validation() {
   local exit_code=$?
 
   "$ROOT_DIR/tests/windows-vm/prepare-dual-nat.sh" clear >/dev/null 2>&1 || true
+  windows_ps_script "Get-Process iperf3 -ErrorAction SilentlyContinue | Stop-Process -Force" >/dev/null 2>&1 || true
+  ssh_to_vm client-a "pkill -x iperf3 2>/dev/null || true" >/dev/null 2>&1 || true
+  ssh_to_vm client-b "pkill -x iperf3 2>/dev/null || true" >/dev/null 2>&1 || true
   ssh_to_vm client-a "sudo iptables -D FORWARD -i ${MESHLINK_INTERFACE_NAME:-sdwan0} -o ${ROUTE_HOST_IF} -d ${ROUTED_SUBNET} -j ACCEPT 2>/dev/null || true; sudo iptables -D FORWARD -i ${ROUTE_HOST_IF} -o ${MESHLINK_INTERFACE_NAME:-sdwan0} -s ${ROUTED_SUBNET} -j ACCEPT 2>/dev/null || true; sudo ip link del ${ROUTE_HOST_IF} 2>/dev/null || true; sudo ip netns del ${ROUTE_NAMESPACE} 2>/dev/null || true" >/dev/null 2>&1 || true
   collect_validation_artifacts || true
   if (( exit_code != 0 )); then
@@ -699,6 +908,8 @@ main() {
   stop_windows_meshlinkd
   wait_for_ssh mgmt-1 30
   setup_routed_subnet_target
+  build_linux_runtime_artifacts
+  deploy_linux_runtime_artifacts
   ensure_linux_clients_ready
   DIRECT_PEER_PUBLIC_KEY="$(linux_peer_public_key "$DIRECT_NODE")"
   RELAY_PEER_PUBLIC_KEY="$(linux_peer_public_key "$RELAY_NODE")"
@@ -706,7 +917,9 @@ main() {
   generate_windows_keys
 
   refresh_windows_package
+  stage_windows_files_via_qga
   deploy_windows_package >/dev/null
+  ensure_windows_iperf3 >"$VALIDATION_STATE_DIR/windows-iperf3.txt"
   write_windows_config >/dev/null
   restart_windows_meshlinkd >/dev/null
 
@@ -721,15 +934,21 @@ main() {
 
   wait_for_windows_peer_endpoint "$DIRECT_PEER_PUBLIC_KEY" "${DIRECT_EXPECTED_HOST}:${DIRECT_EXPECTED_PORT}" 50 \
     >"$VALIDATION_STATE_DIR/windows-direct-endpoint.txt"
-  wait_for_windows_peer_overlay_ping_state "$DIRECT_PEER_PUBLIC_KEY" present 25 \
+  wait_for_windows_peer_overlay_ping_state "$DIRECT_PEER_PUBLIC_KEY" present 45 \
     >"$VALIDATION_STATE_DIR/windows-direct-overlay-peer.txt"
   RESULT_DIRECT="pass"
+
+  run_bidirectional_iperf3 \
+    "$DIRECT_NODE" \
+    "$(tr -d '\r\n' <"$VALIDATION_STATE_DIR/windows-direct-overlay-peer.txt")" \
+    "$(windows_overlay_ip)"
+  RESULT_IPERF="pass"
 
   "$ROOT_DIR/tests/windows-vm/prepare-dual-nat.sh" drop >/dev/null
 
   wait_for_windows_peer_endpoint_host "$RELAY_PEER_PUBLIC_KEY" "$MGMT_IP" 60 \
     >"$VALIDATION_STATE_DIR/windows-relay-endpoint.txt"
-  wait_for_windows_peer_overlay_ping_state "$RELAY_PEER_PUBLIC_KEY" present 25 \
+  wait_for_windows_peer_overlay_ping_state "$RELAY_PEER_PUBLIC_KEY" present 45 \
     >"$VALIDATION_STATE_DIR/windows-relay-overlay-peer.txt"
   RESULT_RELAY="pass"
 
@@ -737,7 +956,7 @@ main() {
 
   wait_for_windows_peer_endpoint "$RELAY_PEER_PUBLIC_KEY" "${RELAY_DIRECT_EXPECTED_HOST}:${RELAY_DIRECT_EXPECTED_PORT}" 90 \
     >"$VALIDATION_STATE_DIR/windows-recovery-endpoint.txt"
-  wait_for_windows_peer_overlay_ping_state "$RELAY_PEER_PUBLIC_KEY" present 25 \
+  wait_for_windows_peer_overlay_ping_state "$RELAY_PEER_PUBLIC_KEY" present 45 \
     >"$VALIDATION_STATE_DIR/windows-recovery-overlay-peer.txt"
   RESULT_RECOVERY="pass"
 
@@ -745,6 +964,8 @@ main() {
     >"$VALIDATION_STATE_DIR/windows-route-allowed-ips.txt"
   wait_for_windows_route_state "$ROUTED_SUBNET" present 60 \
     >"$VALIDATION_STATE_DIR/windows-route-present.txt"
+  wait_for_linux_client_running "$ROUTE_ADVERTISER_NODE" 20
+  wait_for_linux_public_proxy_listener "$ROUTE_ADVERTISER_NODE" "${MESHLINK_CLIENT_A_WG_PORT:-51820}" 20
   wait_for_windows_ping_state "$ROUTED_TARGET_IP" present 25
   RESULT_ROUTE_ADV="pass"
 

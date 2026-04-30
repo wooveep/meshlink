@@ -46,6 +46,7 @@ require_commands virsh xorriso
 
 MESHLINK_WINDOWS_VM_NAME="${MESHLINK_WINDOWS_VM_NAME:-meshlink-win-a}"
 MESHLINK_WINDOWS_PACKAGE="${MESHLINK_WINDOWS_PACKAGE:-}"
+MESHLINK_WINDOWS_SHARE_DIR="${MESHLINK_WINDOWS_SHARE_DIR:-/home/cloudyi/ShareVM}"
 
 if [[ -z "$MESHLINK_WINDOWS_PACKAGE" ]]; then
   echo "MESHLINK_WINDOWS_PACKAGE is required in $WINDOWS_ENV_FILE" >&2
@@ -55,7 +56,12 @@ fi
 xml="$(virsh dumpxml "$MESHLINK_WINDOWS_VM_NAME")"
 iso_path="$(perl -0ne "print \$1 if /<disk[^>]*>.*?<source file='([^']*meshlink-package\\.iso)'.*?<\/disk>/s" <<<"$xml")"
 if [[ -z "$iso_path" ]]; then
-  echo "could not find meshlink-package.iso attached to $MESHLINK_WINDOWS_VM_NAME" >&2
+  if [[ -d "$MESHLINK_WINDOWS_SHARE_DIR" ]]; then
+    cp "$MESHLINK_WINDOWS_PACKAGE" "$MESHLINK_WINDOWS_SHARE_DIR/MESHLINK.ZIP"
+    echo "refreshed package in shared directory for $MESHLINK_WINDOWS_VM_NAME -> $MESHLINK_WINDOWS_SHARE_DIR/MESHLINK.ZIP"
+    exit 0
+  fi
+  echo "could not find meshlink-package.iso attached to $MESHLINK_WINDOWS_VM_NAME and shared directory is missing: $MESHLINK_WINDOWS_SHARE_DIR" >&2
   exit 1
 fi
 

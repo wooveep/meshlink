@@ -18,12 +18,16 @@ use api_client::proto::{
     SyncConfigRequest,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+#[cfg(not(windows))]
+use netlink_linux::peer_endpoint as current_peer_endpoint;
 use netlink_linux::{LinuxWireGuardBackend, PublicUdpProxy};
 use rand_core::OsRng;
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use wg_manager::{build_desired_state_with_overrides, Endpoint, WireGuardBackend};
+#[cfg(windows)]
+use wintun_windows::peer_endpoint as current_peer_endpoint;
 use wintun_windows::WindowsWireGuardBackend;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
@@ -535,16 +539,69 @@ fn reconcile_wireguard_state(
     backend
         .reconcile(&outcome.desired_state)
         .context("reconcile wireguard state")?;
+    verify_peer_endpoints_after_apply(&outcome.desired_state);
 
+    let peer_endpoints = outcome
+        .desired_state
+        .peers
+        .iter()
+        .map(|peer| format!("{}={}", peer.peer_id, peer.endpoint.render()))
+        .collect::<Vec<_>>()
+        .join(",");
     info!(
         interface = %outcome.desired_state.interface_name,
         overlay_ipv4 = %outcome.desired_state.address_cidr,
         configured_peers = outcome.desired_state.peers.len(),
         skipped_peers = outcome.skipped_peers.len(),
+        peer_endpoints = %peer_endpoints,
         "wireguard state reconciled"
     );
 
     Ok(())
+}
+
+fn verify_peer_endpoints_after_apply(desired: &wg_manager::DesiredState) {
+    if std::env::var("MESHLINK_VERIFY_ENDPOINT_APPLY")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        == false
+    {
+        return;
+    }
+
+    for peer in &desired.peers {
+        match current_peer_endpoint(&desired.interface_name, &peer.public_key) {
+            Ok(Some(actual)) if actual == peer.endpoint => {
+                info!(
+                    peer_id = %peer.peer_id,
+                    endpoint = %actual.render(),
+                    "wireguard endpoint read-after-write verified"
+                );
+            }
+            Ok(Some(actual)) => {
+                warn!(
+                    peer_id = %peer.peer_id,
+                    expected = %peer.endpoint.render(),
+                    actual = %actual.render(),
+                    "wireguard endpoint read-after-write mismatch"
+                );
+            }
+            Ok(None) => {
+                warn!(
+                    peer_id = %peer.peer_id,
+                    expected = %peer.endpoint.render(),
+                    "wireguard endpoint read-after-write missing peer"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    peer_id = %peer.peer_id,
+                    expected = %peer.endpoint.render(),
+                    "wireguard endpoint read-after-write failed: {err:#}"
+                );
+            }
+        }
+    }
 }
 
 async fn maybe_start_linux_public_proxy(config: &AgentConfig) -> Result<Option<PublicUdpProxy>> {
@@ -584,9 +641,19 @@ async fn sync_linux_public_proxy(
             .get(&peer.peer_id)
             .cloned()
             .or_else(|| cached_direct_endpoint(peer));
+        let remote_endpoint_label = remote_endpoint
+            .as_ref()
+            .map(Endpoint::render)
+            .unwrap_or_else(|| "none".to_string());
         proxy
             .set_peer_remote_endpoint(&peer.peer_id, remote_endpoint)
             .await?;
+        info!(
+            peer_id = %peer.peer_id,
+            local_endpoint = %handle.loopback_endpoint.render(),
+            remote_endpoint = %remote_endpoint_label,
+            "linux public proxy peer synced"
+        );
         local_endpoints.insert(peer.peer_id.clone(), handle.loopback_endpoint);
     }
 

@@ -30,16 +30,38 @@ SIGNALD_DEB=""
 RELAYD_DEB=""
 CLIENT_DEB=""
 
-ensure_deb_artifacts() {
-  MANAGEMENTD_DEB="$(ls "$PACKAGE_DIR"/meshlink-managementd_*_amd64.deb 2>/dev/null | head -n1 || true)"
-  SIGNALD_DEB="$(ls "$PACKAGE_DIR"/meshlink-signald_*_amd64.deb 2>/dev/null | head -n1 || true)"
-  RELAYD_DEB="$(ls "$PACKAGE_DIR"/meshlink-relayd_*_amd64.deb 2>/dev/null | head -n1 || true)"
-  CLIENT_DEB="$(ls "$PACKAGE_DIR"/meshlink-client_*_amd64.deb 2>/dev/null | head -n1 || true)"
+derive_package_version() {
+  awk '
+    /^\[workspace.package\]$/ { in_workspace = 1; next }
+    /^\[/ { in_workspace = 0 }
+    in_workspace && $1 == "version" {
+      gsub(/"/, "", $3)
+      print $3
+      exit
+    }
+  ' "$ROOT_DIR/client/Cargo.toml"
+}
 
-  if [[ -z "$MANAGEMENTD_DEB" || -z "$SIGNALD_DEB" || -z "$RELAYD_DEB" || -z "$CLIENT_DEB" ]]; then
-    echo "missing deb artifacts under $PACKAGE_DIR; run 'make package-deb' first" >&2
+require_deb_artifact() {
+  local package="$1"
+  local version="$2"
+  local path="$PACKAGE_DIR/${package}_${version}-1_amd64.deb"
+
+  if [[ ! -f "$path" ]]; then
+    echo "missing deb artifact: $path; run 'make package-deb' for version ${version}" >&2
     exit 1
   fi
+
+  printf '%s\n' "$path"
+}
+
+ensure_deb_artifacts() {
+  local package_version="${MESHLINK_PACKAGE_VERSION:-$(derive_package_version)}"
+
+  MANAGEMENTD_DEB="$(require_deb_artifact meshlink-managementd "$package_version")"
+  SIGNALD_DEB="$(require_deb_artifact meshlink-signald "$package_version")"
+  RELAYD_DEB="$(require_deb_artifact meshlink-relayd "$package_version")"
+  CLIENT_DEB="$(require_deb_artifact meshlink-client "$package_version")"
 
   for package in "$MANAGEMENTD_DEB" "$SIGNALD_DEB" "$RELAYD_DEB" "$CLIENT_DEB"; do
     dpkg-deb -I "$package" >/dev/null
@@ -174,16 +196,16 @@ copy_configs() {
 
 reset_remote_state() {
   local node="$1"
-  ssh_to_vm "$node" "sudo systemctl stop meshlink-managementd meshlink-client 2>/dev/null || true; sudo systemctl reset-failed meshlink-managementd meshlink-client 2>/dev/null || true; if [ '$node' = 'mgmt-1' ]; then sudo rm -f /var/lib/meshlink/management.db; fi"
+  ssh_to_vm "$node" "sudo systemctl stop meshlink-managementd meshlink-client 2>/dev/null || true; sudo pkill -x managementd 2>/dev/null || true; sudo pkill -x meshlinkd 2>/dev/null || true; sudo systemctl reset-failed meshlink-managementd meshlink-client 2>/dev/null || true; if [ '$node' = 'mgmt-1' ]; then sudo rm -f /var/lib/meshlink/management.db; fi"
 }
 
 install_management_packages() {
-  ssh_to_vm mgmt-1 "sudo dpkg -i ${REMOTE_DEB_DIR}/$(basename "$MANAGEMENTD_DEB") ${REMOTE_DEB_DIR}/$(basename "$SIGNALD_DEB") ${REMOTE_DEB_DIR}/$(basename "$RELAYD_DEB")"
+  ssh_to_vm mgmt-1 "sudo DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i ${REMOTE_DEB_DIR}/$(basename "$MANAGEMENTD_DEB") ${REMOTE_DEB_DIR}/$(basename "$SIGNALD_DEB") ${REMOTE_DEB_DIR}/$(basename "$RELAYD_DEB")"
 }
 
 install_client_package() {
   local node="$1"
-  ssh_to_vm "$node" "sudo dpkg -i ${REMOTE_DEB_DIR}/$(basename "$CLIENT_DEB")"
+  ssh_to_vm "$node" "sudo DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i ${REMOTE_DEB_DIR}/$(basename "$CLIENT_DEB")"
 }
 
 apply_runtime_config() {
@@ -276,6 +298,9 @@ assert_remote_command mgmt-1 "dpkg -s meshlink-signald >/dev/null"
 assert_remote_command mgmt-1 "dpkg -s meshlink-relayd >/dev/null"
 assert_remote_command client-a "dpkg -s meshlink-client >/dev/null"
 assert_remote_command client-b "dpkg -s meshlink-client >/dev/null"
+assert_remote_command mgmt-1 "dpkg-query -W -f='\${Version}' meshlink-managementd | grep -qx '$(dpkg-deb -f "$MANAGEMENTD_DEB" Version)'"
+assert_remote_command client-a "dpkg-query -W -f='\${Version}' meshlink-client | grep -qx '$(dpkg-deb -f "$CLIENT_DEB" Version)'"
+assert_remote_command client-b "dpkg-query -W -f='\${Version}' meshlink-client | grep -qx '$(dpkg-deb -f "$CLIENT_DEB" Version)'"
 
 assert_remote_command mgmt-1 "test -x /usr/bin/signald && test -x /usr/bin/relayd"
 assert_remote_command mgmt-1 "test -f /etc/default/meshlink-signald.env && test -f /etc/default/meshlink-relayd.env"

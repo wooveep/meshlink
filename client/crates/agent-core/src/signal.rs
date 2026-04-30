@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     process::{Command, Stdio},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context, Result};
@@ -103,19 +103,28 @@ struct PeerSignalState {
     remote_candidates: Vec<Candidate>,
     request_received: bool,
     attempt: Option<PunchAttempt>,
+    path_mode: PathMode,
+    attempt_generation: u64,
     last_selected_candidate: Option<Candidate>,
+    last_applied_endpoint: Option<Endpoint>,
     last_observed_remote_candidate: Option<Candidate>,
     last_reported_observed_remote_candidate: Option<Candidate>,
     relay: Option<ActiveRelay>,
     next_direct_retry_at: Option<Instant>,
+    last_direct_confirmed_at: Option<Instant>,
+    last_transition_reason: Option<String>,
+    last_transition_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
 struct PunchAttempt {
+    generation: u64,
     selected_candidate: Candidate,
     started_at: Instant,
     baseline_handshake: u64,
     last_reassert_at: Instant,
+    recovery_from_relay: bool,
+    endpoint_applied: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +138,21 @@ enum RemoteFailureDisposition {
     Ignore,
     PromoteDirect,
     FallbackToRelay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathMode {
+    DirectCandidateKnown,
+    DirectProbing,
+    DirectActive,
+    RelayActive,
+    DirectRecoveryProbing,
+}
+
+impl Default for PathMode {
+    fn default() -> Self {
+        Self::DirectCandidateKnown
+    }
 }
 
 impl ActiveRelay {
@@ -341,6 +365,7 @@ async fn connect_and_run(
                     handle_observed_remote_endpoint(
                         device_id,
                         &snapshot,
+                        &local_candidates,
                         &mut peer_states,
                         &update_tx,
                         &outbound_tx,
@@ -431,7 +456,9 @@ async fn handle_incoming_envelope(
                 "received candidate announcement"
             );
             state.remote_candidates = sort_candidates(body.candidates);
-            if should_initiate(device_id, &peer.peer_id) {
+            mark_direct_candidate_known(state, "candidate_announcement");
+            if should_initiate(device_id, &peer.peer_id) && !direct_path_active_without_relay(state)
+            {
                 send_punch_request(
                     outbound_tx,
                     device_id,
@@ -453,14 +480,28 @@ async fn handle_incoming_envelope(
             if !body.candidates.is_empty() {
                 state.remote_candidates = sort_candidates(body.candidates);
             }
+            mark_direct_candidate_known(state, "punch_request");
             start_attempt_for_peer(config, device_id, peer, state, update_tx, local_candidates)
                 .await?;
         }
         Some(Body::PunchResult(body)) => {
-            info!(peer_id = %peer.peer_id, success = body.success, "received punch result");
+            info!(
+                peer_id = %peer.peer_id,
+                success = body.success,
+                reason = %body.reason,
+                observed_candidate = body.observed_candidate.is_some(),
+                "received punch result"
+            );
             let observed_candidate = body.observed_candidate.clone();
             if let Some(candidate) = observed_candidate {
-                if update_local_observed_candidate(local_candidates, &candidate) {
+                if observed_local_candidate_matches_remote_lan(&candidate, &state.remote_candidates)
+                {
+                    info!(
+                        peer_id = %peer.peer_id,
+                        endpoint = %render_candidate_endpoint(&candidate),
+                        "ignoring peer-observed local endpoint that matches peer LAN"
+                    );
+                } else if update_local_observed_candidate(local_candidates, &candidate) {
                     state.last_observed_remote_candidate = Some(candidate.clone());
                     info!(
                         peer_id = %peer.peer_id,
@@ -471,24 +512,61 @@ async fn handle_incoming_envelope(
                 }
             }
             if body.success {
-                if let Some(candidate) = candidate_for_remote_direct_progress(state) {
-                    update_tx
-                        .send(SignalUpdate {
-                            peer_id: peer.peer_id.clone(),
-                            endpoint_override: candidate_to_endpoint(&candidate),
-                            probe_overlay_ipv4: Some(peer.overlay_ipv4.clone()),
-                            reason: "remote_direct_progress".to_string(),
-                        })
-                        .await
-                        .context("apply remote direct progress")?;
+                if can_accept_remote_direct_progress(state, body.selected_candidate.as_ref()) {
+                    if let Some(candidate) = candidate_for_remote_direct_progress(state) {
+                        info!(
+                            peer_id = %peer.peer_id,
+                            endpoint = %render_candidate_endpoint(&candidate),
+                            "remote direct progress confirmed; clearing local punch attempt"
+                        );
+                        state.attempt = None;
+                        state.next_direct_retry_at =
+                            Some(Instant::now() + direct_retry_delay(config.punch_timeout));
+                        state.last_direct_confirmed_at = Some(Instant::now());
+                        transition_path_mode(
+                            state,
+                            PathMode::DirectActive,
+                            "remote_direct_progress",
+                        );
+                        let endpoint_override = candidate_to_endpoint(&candidate);
+                        state.last_applied_endpoint = endpoint_override.clone();
+                        update_tx
+                            .send(SignalUpdate {
+                                peer_id: peer.peer_id.clone(),
+                                endpoint_override,
+                                probe_overlay_ipv4: Some(peer.overlay_ipv4.clone()),
+                                reason: "remote_direct_progress".to_string(),
+                            })
+                            .await
+                            .context("apply remote direct progress")?;
+                        if let Some(active_relay) = state.relay.take() {
+                            info!(peer_id = %peer.peer_id, "direct path recovered; releasing relay");
+                            release_active_relay(
+                                config,
+                                device_id,
+                                &peer.peer_id,
+                                active_relay,
+                                "remote_direct_recovered",
+                            )
+                            .await;
+                        }
+                    }
+                } else {
+                    info!(
+                        peer_id = %peer.peer_id,
+                        relay_active = state.relay.is_some(),
+                        "ignoring remote direct progress while local relay path is still stable"
+                    );
                 }
             } else if body.observed_candidate.is_none() {
                 let latest =
                     latest_handshake(&config.interface_name, &peer.public_key).unwrap_or_default();
-                match remote_failure_disposition(state, latest) {
+                match remote_failure_disposition(state, latest, body.selected_candidate.as_ref()) {
                     RemoteFailureDisposition::Ignore => {
                         info!(
                             peer_id = %peer.peer_id,
+                            latest_handshake = latest,
+                            relay_active = state.relay.is_some(),
                             "ignoring remote punch failure without active local attempt"
                         );
                     }
@@ -616,6 +694,9 @@ async fn maybe_send_punch_requests(
         if state.attempt.is_some() {
             continue;
         }
+        if direct_path_active_without_relay(state) {
+            continue;
+        }
         if !relay_retry_due(state) {
             continue;
         }
@@ -690,9 +771,22 @@ async fn start_attempt_for_peer(
     if !relay_retry_due(state) {
         return Ok(());
     }
+    if direct_path_active_without_relay(state) {
+        return Ok(());
+    }
+
+    let latest = latest_handshake(&config.interface_name, &peer.public_key).unwrap_or_default();
+    if direct_attempt_suppressed_by_recent_handshake(
+        state,
+        latest,
+        current_unix_timestamp(),
+        config.punch_timeout,
+    ) {
+        return Ok(());
+    }
 
     let Some(candidate) =
-        select_remote_candidate_for_local(&state.remote_candidates, local_candidates)
+        select_stable_remote_candidate(&state.remote_candidates, local_candidates)
     else {
         return Ok(());
     };
@@ -704,30 +798,68 @@ async fn start_attempt_for_peer(
         host: candidate.address.clone(),
         port,
     };
-    let baseline = latest_handshake(&config.interface_name, &peer.public_key).unwrap_or_default();
 
+    let recovery_from_relay = state.relay.is_some();
+    let endpoint_applied = !recovery_from_relay
+        || direct_recovery_endpoint_apply_allowed(
+            state,
+            latest,
+            current_unix_timestamp(),
+            config.punch_timeout,
+        );
+    let generation = next_attempt_generation(state);
     state.attempt = Some(PunchAttempt {
+        generation,
         selected_candidate: candidate.clone(),
         started_at: Instant::now(),
-        baseline_handshake: baseline,
+        baseline_handshake: latest,
         last_reassert_at: Instant::now(),
+        recovery_from_relay,
+        endpoint_applied,
     });
     state.last_selected_candidate = Some(candidate);
+    if endpoint_applied {
+        state.last_applied_endpoint = Some(endpoint.clone());
+    }
+    transition_path_mode(
+        state,
+        if recovery_from_relay {
+            PathMode::DirectRecoveryProbing
+        } else {
+            PathMode::DirectProbing
+        },
+        if recovery_from_relay {
+            "direct_recovery_probe_started"
+        } else {
+            "punch_started"
+        },
+    );
     info!(
         peer_id = %peer.peer_id,
         endpoint = %endpoint.render(),
+        generation,
+        recovery_from_relay,
+        endpoint_applied,
         "starting punch attempt"
     );
 
-    update_tx
-        .send(SignalUpdate {
-            peer_id: peer.peer_id.clone(),
-            endpoint_override: Some(endpoint),
-            probe_overlay_ipv4: Some(peer.overlay_ipv4.clone()),
-            reason: "punch_started".to_string(),
-        })
-        .await
-        .context("send endpoint override update")
+    if endpoint_applied {
+        update_tx
+            .send(SignalUpdate {
+                peer_id: peer.peer_id.clone(),
+                endpoint_override: Some(endpoint),
+                probe_overlay_ipv4: Some(peer.overlay_ipv4.clone()),
+                reason: if recovery_from_relay {
+                    "direct_recovery_probe_started".to_string()
+                } else {
+                    "punch_started".to_string()
+                },
+            })
+            .await
+            .context("send endpoint override update")?;
+    }
+
+    Ok(())
 }
 
 async fn check_attempts(
@@ -747,7 +879,7 @@ async fn check_attempts(
         };
 
         let latest = latest_handshake(&config.interface_name, &peer.public_key).unwrap_or_default();
-        if latest > attempt.baseline_handshake && latest > 0 {
+        if direct_attempt_locally_confirmed(&config.interface_name, peer, &attempt, latest) {
             complete_direct_attempt(
                 config,
                 device_id,
@@ -777,16 +909,8 @@ async fn check_attempts(
             continue;
         }
 
-        if attempt.last_reassert_at.elapsed() >= Duration::from_secs(2) {
-            update_tx
-                .send(SignalUpdate {
-                    peer_id: peer.peer_id.clone(),
-                    endpoint_override: None,
-                    probe_overlay_ipv4: None,
-                    reason: "punch_rearm_clear".to_string(),
-                })
-                .await
-                .context("clear active punch endpoint override before reassert")?;
+        if attempt.endpoint_applied && attempt.last_reassert_at.elapsed() >= Duration::from_secs(2)
+        {
             update_tx
                 .send(SignalUpdate {
                     peer_id: peer.peer_id.clone(),
@@ -797,14 +921,23 @@ async fn check_attempts(
                 .await
                 .context("reassert active punch endpoint override")?;
             if let Some(active_attempt) = state.attempt.as_mut() {
-                active_attempt.last_reassert_at = Instant::now();
+                if active_attempt.generation == attempt.generation {
+                    active_attempt.last_reassert_at = Instant::now();
+                    state.last_applied_endpoint =
+                        candidate_to_endpoint(&attempt.selected_candidate);
+                }
             }
         }
 
         probe_overlay_peer(&peer.overlay_ipv4);
 
         if attempt.started_at.elapsed() >= config.punch_timeout {
-            warn!(peer_id = %peer.peer_id, "hole punch attempt timed out");
+            warn!(
+                peer_id = %peer.peer_id,
+                generation = attempt.generation,
+                recovery_from_relay = attempt.recovery_from_relay,
+                "hole punch attempt timed out"
+            );
             outbound_tx
                 .send(SignalEnvelope {
                     kind: SignalKind::PunchResult as i32,
@@ -821,8 +954,41 @@ async fn check_attempts(
                 })
                 .await
                 .context("send punch failure")?;
-            state.attempt = None;
-            fallback_to_relay(config, device_id, peer, state, update_tx, "punch_timeout").await?;
+            if state
+                .attempt
+                .as_ref()
+                .map(|active| active.generation == attempt.generation)
+                .unwrap_or(false)
+            {
+                state.attempt = None;
+                if attempt.endpoint_applied {
+                    if is_lan_candidate(&attempt.selected_candidate) {
+                        transition_path_mode(
+                            state,
+                            PathMode::DirectCandidateKnown,
+                            "lan_direct_timeout",
+                        );
+                    } else {
+                        fallback_to_relay(
+                            config,
+                            device_id,
+                            peer,
+                            state,
+                            update_tx,
+                            "punch_timeout",
+                        )
+                        .await?;
+                    }
+                } else if state.relay.is_some() {
+                    transition_path_mode(state, PathMode::RelayActive, "passive_recovery_timeout");
+                }
+            } else {
+                info!(
+                    peer_id = %peer.peer_id,
+                    generation = attempt.generation,
+                    "ignoring stale punch timeout for superseded attempt"
+                );
+            }
         }
     }
     Ok(())
@@ -831,6 +997,7 @@ async fn check_attempts(
 async fn handle_observed_remote_endpoint(
     device_id: &str,
     snapshot: &PeerSnapshot,
+    local_candidates: &[Candidate],
     peer_states: &mut BTreeMap<String, PeerSignalState>,
     update_tx: &mpsc::Sender<SignalUpdate>,
     outbound_tx: &mpsc::Sender<SignalEnvelope>,
@@ -849,6 +1016,23 @@ async fn handle_observed_remote_endpoint(
     let Some(attempt) = state.attempt.as_ref() else {
         return Ok(());
     };
+
+    if observed_remote_endpoint_matches_local_lan(&observed.endpoint, local_candidates) {
+        info!(
+            peer_id = %peer.peer_id,
+            endpoint = %observed.endpoint.render(),
+            "ignoring observed remote endpoint that matches local LAN"
+        );
+        return Ok(());
+    }
+    if reachable_lan_candidate_exists(&state.remote_candidates, local_candidates) {
+        info!(
+            peer_id = %peer.peer_id,
+            endpoint = %observed.endpoint.render(),
+            "ignoring observed remote endpoint because a same-LAN candidate is reachable"
+        );
+        return Ok(());
+    }
 
     let observed_candidate = Candidate {
         r#type: attempt.selected_candidate.r#type,
@@ -910,6 +1094,7 @@ async fn apply_observed_remote_candidate(
             })
             .await
             .context("apply observed remote candidate")?;
+        state.last_applied_endpoint = candidate_to_endpoint(&observed_candidate);
     }
 
     if should_report {
@@ -966,6 +1151,18 @@ async fn complete_direct_attempt(
         .await
         .context("send punch success")?;
     state.attempt = None;
+    transition_path_mode(state, PathMode::DirectActive, reason);
+    let endpoint_override = candidate_to_endpoint(&attempt.selected_candidate);
+    state.last_applied_endpoint = endpoint_override.clone();
+    update_tx
+        .send(SignalUpdate {
+            peer_id: peer.peer_id.clone(),
+            endpoint_override,
+            probe_overlay_ipv4: Some(peer.overlay_ipv4.clone()),
+            reason: "direct_path_confirmed".to_string(),
+        })
+        .await
+        .context("apply direct endpoint after local handshake")?;
     if let Some(active_relay) = state.relay.take() {
         info!(peer_id = %peer.peer_id, "direct path recovered; releasing relay");
         release_active_relay(
@@ -977,16 +1174,8 @@ async fn complete_direct_attempt(
         )
         .await;
     }
-    update_tx
-        .send(SignalUpdate {
-            peer_id: peer.peer_id.clone(),
-            endpoint_override: candidate_to_endpoint(&attempt.selected_candidate),
-            probe_overlay_ipv4: Some(peer.overlay_ipv4.clone()),
-            reason: "direct_path_confirmed".to_string(),
-        })
-        .await
-        .context("apply direct endpoint after local handshake")?;
     state.next_direct_retry_at = Some(Instant::now() + direct_retry_delay(config.punch_timeout));
+    state.last_direct_confirmed_at = Some(Instant::now());
     Ok(())
 }
 
@@ -1085,6 +1274,8 @@ async fn fallback_to_relay(
     if endpoint_override.is_some() {
         state.next_direct_retry_at =
             Some(Instant::now() + direct_retry_delay(config.punch_timeout));
+        state.last_applied_endpoint = endpoint_override.clone();
+        transition_path_mode(state, PathMode::RelayActive, reason);
     }
 
     update_tx
@@ -1408,6 +1599,51 @@ fn update_local_observed_candidate(
             .any(|candidate| candidate == observed)
 }
 
+fn observed_remote_endpoint_matches_local_lan(
+    observed: &Endpoint,
+    local_candidates: &[Candidate],
+) -> bool {
+    local_candidates.iter().any(|candidate| {
+        is_lan_candidate(candidate) && same_ipv4_subnet_24(&observed.host, &candidate.address)
+    })
+}
+
+fn observed_local_candidate_matches_remote_lan(
+    observed: &Candidate,
+    remote_candidates: &[Candidate],
+) -> bool {
+    if !matches!(
+        CandidateType::try_from(observed.r#type).ok(),
+        Some(CandidateType::PublicIpv4)
+    ) {
+        return false;
+    }
+
+    remote_candidates.iter().any(|candidate| {
+        is_lan_candidate(candidate) && same_ipv4_subnet_24(&observed.address, &candidate.address)
+    })
+}
+
+fn is_lan_candidate(candidate: &Candidate) -> bool {
+    matches!(
+        CandidateType::try_from(candidate.r#type).ok(),
+        Some(CandidateType::Lan)
+    )
+}
+
+fn same_ipv4_subnet_24(left: &str, right: &str) -> bool {
+    let Ok(left) = left.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let Ok(right) = right.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+
+    let left = left.octets();
+    let right = right.octets();
+    left[0..3] == right[0..3]
+}
+
 fn render_candidate_endpoint(candidate: &Candidate) -> String {
     let port = u16::try_from(candidate.port).unwrap_or_default();
     Endpoint {
@@ -1424,12 +1660,49 @@ fn relay_retry_due(state: &PeerSignalState) -> bool {
     }
 }
 
+fn next_attempt_generation(state: &mut PeerSignalState) -> u64 {
+    state.attempt_generation = state.attempt_generation.saturating_add(1).max(1);
+    state.attempt_generation
+}
+
+fn transition_path_mode(state: &mut PeerSignalState, mode: PathMode, reason: &str) {
+    if state.path_mode != mode {
+        state.path_mode = mode;
+        state.last_transition_at = Some(Instant::now());
+    }
+    state.last_transition_reason = Some(reason.to_string());
+}
+
+fn mark_direct_candidate_known(state: &mut PeerSignalState, reason: &str) {
+    if direct_path_active_without_relay(state) {
+        state.last_transition_reason = Some(reason.to_string());
+        return;
+    }
+    transition_path_mode(state, PathMode::DirectCandidateKnown, reason);
+}
+
 fn remote_failure_disposition(
     state: &PeerSignalState,
     latest_handshake: u64,
+    selected_candidate: Option<&Candidate>,
 ) -> RemoteFailureDisposition {
     match state.attempt.as_ref() {
+        None if recent_direct_confirmation(state) => RemoteFailureDisposition::Ignore,
+        None if state.relay.is_none() => RemoteFailureDisposition::FallbackToRelay,
         None => RemoteFailureDisposition::Ignore,
+        Some(attempt)
+            if selected_candidate
+                .map(|candidate| !same_candidate(candidate, &attempt.selected_candidate))
+                .unwrap_or(false) =>
+        {
+            RemoteFailureDisposition::Ignore
+        }
+        Some(attempt) if is_lan_candidate(&attempt.selected_candidate) => {
+            RemoteFailureDisposition::Ignore
+        }
+        Some(attempt) if attempt.recovery_from_relay && !attempt.endpoint_applied => {
+            RemoteFailureDisposition::Ignore
+        }
         Some(attempt) if latest_handshake > attempt.baseline_handshake && latest_handshake > 0 => {
             RemoteFailureDisposition::PromoteDirect
         }
@@ -1437,8 +1710,72 @@ fn remote_failure_disposition(
     }
 }
 
+fn recent_direct_confirmation(state: &PeerSignalState) -> bool {
+    state
+        .last_direct_confirmed_at
+        .map(|confirmed_at| confirmed_at.elapsed() <= Duration::from_secs(10))
+        .unwrap_or(false)
+}
+
 fn direct_retry_delay(punch_timeout: Duration) -> Duration {
-    Duration::from_secs((punch_timeout.as_secs().max(3) * 3).max(10))
+    Duration::from_secs((punch_timeout.as_secs().max(3) * 3).max(direct_retry_min_secs()))
+}
+
+fn direct_retry_min_secs() -> u64 {
+    60
+}
+
+fn direct_health_window(punch_timeout: Duration) -> Duration {
+    Duration::from_secs((punch_timeout.as_secs().max(3) * 2).max(direct_retry_min_secs()))
+}
+
+fn direct_attempt_suppressed_by_recent_handshake(
+    state: &PeerSignalState,
+    latest_handshake: u64,
+    now_unix: u64,
+    punch_timeout: Duration,
+) -> bool {
+    if state.relay.is_some() || latest_handshake == 0 {
+        return false;
+    }
+
+    now_unix.saturating_sub(latest_handshake) <= direct_health_window(punch_timeout).as_secs()
+}
+
+fn direct_recovery_endpoint_apply_allowed(
+    state: &PeerSignalState,
+    latest_handshake: u64,
+    now_unix: u64,
+    punch_timeout: Duration,
+) -> bool {
+    state.relay.is_some()
+        && latest_handshake > 0
+        && now_unix.saturating_sub(latest_handshake)
+            <= direct_health_window(punch_timeout).as_secs()
+}
+
+fn direct_path_active_without_relay(state: &PeerSignalState) -> bool {
+    state.relay.is_none() && matches!(state.path_mode, PathMode::DirectActive)
+}
+
+fn direct_attempt_locally_confirmed(
+    interface_name: &str,
+    peer: &CachedPeer,
+    attempt: &PunchAttempt,
+    latest_handshake: u64,
+) -> bool {
+    if latest_handshake <= attempt.baseline_handshake || latest_handshake == 0 {
+        return false;
+    }
+    if !attempt.recovery_from_relay || attempt.endpoint_applied {
+        return true;
+    }
+
+    current_peer_endpoint(interface_name, &peer.public_key)
+        .ok()
+        .flatten()
+        .map(|endpoint| endpoint_matches_candidate(&endpoint, &attempt.selected_candidate))
+        .unwrap_or(false)
 }
 
 fn candidate_for_remote_direct_progress(state: &PeerSignalState) -> Option<Candidate> {
@@ -1452,6 +1789,66 @@ fn candidate_for_remote_direct_progress(state: &PeerSignalState) -> Option<Candi
                 .map(|attempt| attempt.selected_candidate.clone())
         })
         .or_else(|| state.last_selected_candidate.clone())
+}
+
+fn can_accept_remote_direct_progress(
+    state: &PeerSignalState,
+    selected_candidate: Option<&Candidate>,
+) -> bool {
+    if state.relay.is_none() {
+        return true;
+    }
+
+    let Some(attempt) = state.attempt.as_ref() else {
+        return false;
+    };
+    attempt.endpoint_applied
+        || selected_candidate
+            .map(|candidate| same_candidate(candidate, &attempt.selected_candidate))
+            .unwrap_or(false)
+}
+
+fn select_stable_remote_candidate(
+    remote_candidates: &[Candidate],
+    local_candidates: &[Candidate],
+) -> Option<Candidate> {
+    if let Some(lan) = select_remote_candidate_for_local(
+        &remote_candidates
+            .iter()
+            .filter(|candidate| is_lan_candidate(candidate))
+            .cloned()
+            .collect::<Vec<_>>(),
+        local_candidates,
+    )
+    .filter(|candidate| lan_candidate_reachable_locally(candidate, local_candidates))
+    {
+        return Some(lan);
+    }
+
+    select_remote_candidate_for_local(remote_candidates, local_candidates)
+}
+
+fn reachable_lan_candidate_exists(
+    remote_candidates: &[Candidate],
+    local_candidates: &[Candidate],
+) -> bool {
+    remote_candidates.iter().any(|candidate| {
+        is_lan_candidate(candidate) && lan_candidate_reachable_locally(candidate, local_candidates)
+    })
+}
+
+fn lan_candidate_reachable_locally(candidate: &Candidate, local_candidates: &[Candidate]) -> bool {
+    local_candidates.iter().any(|local| {
+        is_lan_candidate(local) && same_ipv4_subnet_24(&candidate.address, &local.address)
+    })
+}
+
+fn same_candidate(left: &Candidate, right: &Candidate) -> bool {
+    left.r#type == right.r#type && left.address == right.address && left.port == right.port
+}
+
+fn endpoint_matches_candidate(endpoint: &Endpoint, candidate: &Candidate) -> bool {
+    endpoint.host == candidate.address && u32::from(endpoint.port) == candidate.port
 }
 
 fn dedupe_candidates(candidates: Vec<Candidate>) -> Vec<Candidate> {
@@ -1605,6 +2002,13 @@ fn latest_handshake(interface_name: &str, peer_public_key: &str) -> Result<u64> 
     latest_handshake_timestamp(interface_name, peer_public_key)
 }
 
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn session_id(device_id: &str, peer_id: &str) -> String {
     format!("{device_id}:{peer_id}")
 }
@@ -1658,13 +2062,20 @@ fn probe_overlay_peer(overlay_ipv4: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        candidate_for_remote_direct_progress, dedupe_candidates, direct_retry_delay,
-        parse_ip_addr_output, parse_windows_interface_json, relay_host, relay_refresh_delay,
-        remote_failure_disposition, PeerSignalState, PunchAttempt, RemoteFailureDisposition,
+        can_accept_remote_direct_progress, candidate_for_remote_direct_progress,
+        current_unix_timestamp, dedupe_candidates, direct_attempt_suppressed_by_recent_handshake,
+        direct_health_window, direct_path_active_without_relay,
+        direct_recovery_endpoint_apply_allowed, direct_retry_delay, mark_direct_candidate_known,
+        observed_local_candidate_matches_remote_lan, observed_remote_endpoint_matches_local_lan,
+        parse_ip_addr_output, parse_windows_interface_json, reachable_lan_candidate_exists,
+        relay_host, relay_refresh_delay, remote_failure_disposition,
+        select_stable_remote_candidate, ActiveRelay, PathMode, PeerSignalState, PunchAttempt,
+        RemoteFailureDisposition,
     };
     use api_client::proto::{Candidate, CandidateType};
     use relay_client::RelayReservation;
     use std::time::{Duration, Instant};
+    use wg_manager::Endpoint;
 
     #[test]
     fn parse_ip_addr_output_extracts_global_ipv4_addresses() {
@@ -1711,11 +2122,84 @@ mod tests {
     fn direct_retry_delay_has_floor_and_scales_with_timeout() {
         assert_eq!(
             direct_retry_delay(Duration::from_secs(3)),
-            Duration::from_secs(10)
+            Duration::from_secs(60)
         );
         assert_eq!(
-            direct_retry_delay(Duration::from_secs(5)),
-            Duration::from_secs(15)
+            direct_retry_delay(Duration::from_secs(30)),
+            Duration::from_secs(90)
+        );
+    }
+
+    #[test]
+    fn direct_health_window_has_floor_and_scales_with_timeout() {
+        assert_eq!(
+            direct_health_window(Duration::from_secs(5)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            direct_health_window(Duration::from_secs(45)),
+            Duration::from_secs(90)
+        );
+    }
+
+    #[test]
+    fn direct_attempt_is_suppressed_while_direct_handshake_is_recent() {
+        let state = PeerSignalState::default();
+
+        assert!(direct_attempt_suppressed_by_recent_handshake(
+            &state,
+            100,
+            130,
+            Duration::from_secs(5)
+        ));
+    }
+
+    #[test]
+    fn direct_attempt_is_allowed_when_relay_is_active() {
+        let state = PeerSignalState {
+            relay: Some(ActiveRelay {
+                reservation: RelayReservation {
+                    relay_host: "198.51.100.10".to_string(),
+                    udp_port: 45000,
+                    ttl_seconds: 30,
+                    session_id: "session".to_string(),
+                },
+                next_refresh_at: Instant::now(),
+            }),
+            ..PeerSignalState::default()
+        };
+
+        assert!(!direct_attempt_suppressed_by_recent_handshake(
+            &state,
+            100,
+            130,
+            Duration::from_secs(5)
+        ));
+    }
+
+    #[test]
+    fn direct_active_path_without_relay_suppresses_periodic_reprobe() {
+        let state = PeerSignalState {
+            path_mode: PathMode::DirectActive,
+            ..PeerSignalState::default()
+        };
+
+        assert!(direct_path_active_without_relay(&state));
+    }
+
+    #[test]
+    fn candidate_signal_does_not_demote_direct_active_path() {
+        let mut state = PeerSignalState {
+            path_mode: PathMode::DirectActive,
+            ..PeerSignalState::default()
+        };
+
+        mark_direct_candidate_known(&mut state, "candidate_announcement");
+
+        assert_eq!(state.path_mode, PathMode::DirectActive);
+        assert_eq!(
+            state.last_transition_reason.as_deref(),
+            Some("candidate_announcement")
         );
     }
 
@@ -1788,11 +2272,45 @@ mod tests {
     }
 
     #[test]
-    fn remote_failure_is_ignored_once_attempt_is_already_cleared() {
+    fn remote_failure_without_local_attempt_falls_back_when_no_relay_exists() {
         let state = PeerSignalState::default();
 
         assert_eq!(
-            remote_failure_disposition(&state, 0),
+            remote_failure_disposition(&state, 10, None),
+            RemoteFailureDisposition::FallbackToRelay
+        );
+    }
+
+    #[test]
+    fn remote_failure_after_recent_direct_confirmation_is_ignored() {
+        let state = PeerSignalState {
+            last_direct_confirmed_at: Some(Instant::now()),
+            ..PeerSignalState::default()
+        };
+
+        assert_eq!(
+            remote_failure_disposition(&state, 10, None),
+            RemoteFailureDisposition::Ignore
+        );
+    }
+
+    #[test]
+    fn remote_failure_without_local_attempt_is_ignored_when_relay_exists() {
+        let state = PeerSignalState {
+            relay: Some(ActiveRelay {
+                reservation: RelayReservation {
+                    relay_host: "198.51.100.10".to_string(),
+                    udp_port: 45000,
+                    ttl_seconds: 30,
+                    session_id: "session".to_string(),
+                },
+                next_refresh_at: Instant::now(),
+            }),
+            ..PeerSignalState::default()
+        };
+
+        assert_eq!(
+            remote_failure_disposition(&state, 0, None),
             RemoteFailureDisposition::Ignore
         );
     }
@@ -1801,6 +2319,7 @@ mod tests {
     fn remote_failure_promotes_direct_when_handshake_advanced() {
         let mut state = PeerSignalState::default();
         state.attempt = Some(PunchAttempt {
+            generation: 1,
             selected_candidate: Candidate {
                 r#type: CandidateType::PublicIpv4 as i32,
                 address: "198.51.100.10".to_string(),
@@ -1811,10 +2330,12 @@ mod tests {
             started_at: Instant::now(),
             baseline_handshake: 10,
             last_reassert_at: Instant::now(),
+            recovery_from_relay: false,
+            endpoint_applied: true,
         });
 
         assert_eq!(
-            remote_failure_disposition(&state, 11),
+            remote_failure_disposition(&state, 11, None),
             RemoteFailureDisposition::PromoteDirect
         );
     }
@@ -1822,7 +2343,34 @@ mod tests {
     #[test]
     fn remote_failure_falls_back_while_attempt_is_still_pending() {
         let mut state = PeerSignalState::default();
+        let selected = Candidate {
+            r#type: CandidateType::PublicIpv4 as i32,
+            address: "198.51.100.10".to_string(),
+            port: 51820,
+            network_interface: "stun".to_string(),
+            priority: 100,
+        };
         state.attempt = Some(PunchAttempt {
+            generation: 1,
+            selected_candidate: selected,
+            started_at: Instant::now(),
+            baseline_handshake: 10,
+            last_reassert_at: Instant::now(),
+            recovery_from_relay: false,
+            endpoint_applied: true,
+        });
+
+        assert_eq!(
+            remote_failure_disposition(&state, 10, None),
+            RemoteFailureDisposition::FallbackToRelay
+        );
+    }
+
+    #[test]
+    fn stale_remote_failure_for_different_candidate_is_ignored() {
+        let mut state = PeerSignalState::default();
+        state.attempt = Some(PunchAttempt {
+            generation: 2,
             selected_candidate: Candidate {
                 r#type: CandidateType::PublicIpv4 as i32,
                 address: "198.51.100.10".to_string(),
@@ -1833,12 +2381,69 @@ mod tests {
             started_at: Instant::now(),
             baseline_handshake: 10,
             last_reassert_at: Instant::now(),
+            recovery_from_relay: false,
+            endpoint_applied: true,
+        });
+
+        let stale = Candidate {
+            r#type: CandidateType::PublicIpv4 as i32,
+            address: "198.51.100.11".to_string(),
+            port: 51820,
+            network_interface: "stun".to_string(),
+            priority: 100,
+        };
+
+        assert_eq!(
+            remote_failure_disposition(&state, 10, Some(&stale)),
+            RemoteFailureDisposition::Ignore
+        );
+    }
+
+    #[test]
+    fn remote_failure_for_lan_candidate_does_not_fallback_to_relay() {
+        let mut state = PeerSignalState::default();
+        state.attempt = Some(PunchAttempt {
+            generation: 1,
+            selected_candidate: Candidate {
+                r#type: CandidateType::Lan as i32,
+                address: "10.10.1.10".to_string(),
+                port: 51820,
+                network_interface: "lan0".to_string(),
+                priority: 300,
+            },
+            started_at: Instant::now(),
+            baseline_handshake: 0,
+            last_reassert_at: Instant::now(),
+            recovery_from_relay: false,
+            endpoint_applied: true,
         });
 
         assert_eq!(
-            remote_failure_disposition(&state, 10),
-            RemoteFailureDisposition::FallbackToRelay
+            remote_failure_disposition(&state, 0, None),
+            RemoteFailureDisposition::Ignore
         );
+    }
+
+    #[test]
+    fn path_mode_tracks_relay_recovery_attempts() {
+        let state = PeerSignalState {
+            path_mode: PathMode::DirectRecoveryProbing,
+            attempt_generation: 3,
+            relay: Some(ActiveRelay {
+                reservation: RelayReservation {
+                    relay_host: "198.51.100.10".to_string(),
+                    udp_port: 45000,
+                    ttl_seconds: 30,
+                    session_id: "session".to_string(),
+                },
+                next_refresh_at: Instant::now(),
+            }),
+            ..PeerSignalState::default()
+        };
+
+        assert_eq!(state.path_mode, PathMode::DirectRecoveryProbing);
+        assert_eq!(state.attempt_generation, 3);
+        assert!(state.relay.is_some());
     }
 
     #[test]
@@ -1882,5 +2487,202 @@ mod tests {
         };
 
         assert_eq!(candidate_for_remote_direct_progress(&state), Some(observed));
+    }
+
+    #[test]
+    fn relay_recovery_endpoint_apply_requires_recent_relay_handshake() {
+        let state = PeerSignalState {
+            relay: Some(ActiveRelay {
+                reservation: RelayReservation {
+                    relay_host: "198.51.100.10".to_string(),
+                    udp_port: 45000,
+                    ttl_seconds: 30,
+                    session_id: "session".to_string(),
+                },
+                next_refresh_at: Instant::now(),
+            }),
+            ..PeerSignalState::default()
+        };
+        let now = current_unix_timestamp();
+
+        assert!(!direct_recovery_endpoint_apply_allowed(
+            &state,
+            0,
+            now,
+            Duration::from_secs(5),
+        ));
+        assert!(direct_recovery_endpoint_apply_allowed(
+            &state,
+            now,
+            now,
+            Duration::from_secs(5),
+        ));
+        assert!(!direct_recovery_endpoint_apply_allowed(
+            &state,
+            now.saturating_sub(120),
+            now,
+            Duration::from_secs(5),
+        ));
+    }
+
+    #[test]
+    fn remote_direct_progress_is_ignored_when_relay_attempt_has_not_applied_endpoint() {
+        let state = PeerSignalState {
+            relay: Some(ActiveRelay {
+                reservation: RelayReservation {
+                    relay_host: "198.51.100.10".to_string(),
+                    udp_port: 45000,
+                    ttl_seconds: 30,
+                    session_id: "session".to_string(),
+                },
+                next_refresh_at: Instant::now(),
+            }),
+            attempt: Some(PunchAttempt {
+                generation: 1,
+                selected_candidate: Candidate {
+                    r#type: CandidateType::PublicIpv4 as i32,
+                    address: "198.51.100.20".to_string(),
+                    port: 51820,
+                    network_interface: "stun".to_string(),
+                    priority: 100,
+                },
+                started_at: Instant::now(),
+                baseline_handshake: 0,
+                last_reassert_at: Instant::now(),
+                recovery_from_relay: true,
+                endpoint_applied: false,
+            }),
+            ..PeerSignalState::default()
+        };
+
+        assert!(!can_accept_remote_direct_progress(&state, None));
+    }
+
+    #[test]
+    fn relay_recovery_accepts_matching_remote_direct_success() {
+        let selected = Candidate {
+            r#type: CandidateType::PublicIpv4 as i32,
+            address: "198.51.100.20".to_string(),
+            port: 51820,
+            network_interface: "stun".to_string(),
+            priority: 100,
+        };
+        let state = PeerSignalState {
+            relay: Some(ActiveRelay {
+                reservation: RelayReservation {
+                    relay_host: "198.51.100.10".to_string(),
+                    udp_port: 45000,
+                    ttl_seconds: 30,
+                    session_id: "session".to_string(),
+                },
+                next_refresh_at: Instant::now(),
+            }),
+            attempt: Some(PunchAttempt {
+                generation: 1,
+                selected_candidate: selected.clone(),
+                started_at: Instant::now(),
+                baseline_handshake: 0,
+                last_reassert_at: Instant::now(),
+                recovery_from_relay: true,
+                endpoint_applied: false,
+            }),
+            ..PeerSignalState::default()
+        };
+
+        assert!(can_accept_remote_direct_progress(&state, Some(&selected)));
+    }
+
+    #[test]
+    fn proxy_observation_rejects_local_lan_gateway_endpoint() {
+        let local_candidates = vec![Candidate {
+            r#type: CandidateType::Lan as i32,
+            address: "10.10.1.10".to_string(),
+            port: 51820,
+            network_interface: "lan0".to_string(),
+            priority: 300,
+        }];
+
+        assert!(observed_remote_endpoint_matches_local_lan(
+            &Endpoint {
+                host: "10.10.1.254".to_string(),
+                port: 36653,
+            },
+            &local_candidates
+        ));
+        assert!(!observed_remote_endpoint_matches_local_lan(
+            &Endpoint {
+                host: "192.168.123.221".to_string(),
+                port: 51821,
+            },
+            &local_candidates
+        ));
+    }
+
+    #[test]
+    fn peer_observed_local_candidate_rejects_peer_lan_gateway_endpoint() {
+        let remote_candidates = vec![Candidate {
+            r#type: CandidateType::Lan as i32,
+            address: "10.10.2.10".to_string(),
+            port: 51821,
+            network_interface: "lan0".to_string(),
+            priority: 300,
+        }];
+
+        assert!(observed_local_candidate_matches_remote_lan(
+            &Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: "10.10.2.254".to_string(),
+                port: 51820,
+                network_interface: "observed".to_string(),
+                priority: 150,
+            },
+            &remote_candidates
+        ));
+        assert!(!observed_local_candidate_matches_remote_lan(
+            &Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: "192.168.123.211".to_string(),
+                port: 51820,
+                network_interface: "observed".to_string(),
+                priority: 150,
+            },
+            &remote_candidates
+        ));
+    }
+
+    #[test]
+    fn stable_candidate_selection_prefers_reachable_lan_over_observed_public() {
+        let remote_candidates = vec![
+            Candidate {
+                r#type: CandidateType::PublicIpv4 as i32,
+                address: "192.168.123.211".to_string(),
+                port: 10934,
+                network_interface: "observed".to_string(),
+                priority: 500,
+            },
+            Candidate {
+                r#type: CandidateType::Lan as i32,
+                address: "10.10.1.20".to_string(),
+                port: 51830,
+                network_interface: "Ethernet".to_string(),
+                priority: 300,
+            },
+        ];
+        let local_candidates = vec![Candidate {
+            r#type: CandidateType::Lan as i32,
+            address: "10.10.1.10".to_string(),
+            port: 51820,
+            network_interface: "eth0".to_string(),
+            priority: 300,
+        }];
+
+        let selected = select_stable_remote_candidate(&remote_candidates, &local_candidates)
+            .expect("selected candidate");
+
+        assert_eq!(selected.address, "10.10.1.20");
+        assert!(reachable_lan_candidate_exists(
+            &remote_candidates,
+            &local_candidates
+        ));
     }
 }

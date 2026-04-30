@@ -123,6 +123,37 @@ guest_file_read() {
   done
 }
 
+guest_file_write() {
+  local host_path="$1"
+  local guest_path="$2"
+  local handle index chunk_b64
+
+  if [[ ! -f "$host_path" ]]; then
+    echo "host file does not exist: $host_path" >&2
+    return 1
+  fi
+
+  handle="$(
+    jq -cn --arg path "$guest_path" '{execute:"guest-file-open",arguments:{path:$path,mode:"w"}}' \
+      | qga_raw \
+      | jq -r '.return'
+  )"
+
+  trap 'jq -cn --argjson handle "$handle" '"'"'{execute:"guest-file-close",arguments:{handle:$handle}}'"'"' | qga_raw >/dev/null 2>&1 || true' RETURN
+
+  index=0
+  while true; do
+    chunk_b64="$(dd if="$host_path" bs=49152 skip="$index" count=1 iflag=fullblock status=none | base64 -w0)"
+    if [[ -z "$chunk_b64" ]]; then
+      break
+    fi
+    jq -cn --argjson handle "$handle" --arg data "$chunk_b64" \
+      '{execute:"guest-file-write",arguments:{handle:$handle,"buf-b64":$data}}' \
+      | qga_raw >/dev/null
+    index=$((index + 1))
+  done
+}
+
 load_windows_env
 require_tools
 
@@ -162,15 +193,23 @@ case "$ACTION" in
     fi
     guest_file_read "$1"
     ;;
+  write)
+    if (($# != 2)); then
+      echo "usage: $0 write <host-path> <guest-path>" >&2
+      exit 1
+    fi
+    guest_file_write "$1" "$2"
+    ;;
   *)
     cat >&2 <<EOF
-usage: $0 [ping|wait|info|net|exec|powershell|read] ...
+usage: $0 [ping|wait|info|net|exec|powershell|read|write] ...
 
 examples:
   $0 wait 180
   $0 info
   $0 powershell "Get-Service qemu-ga"
   $0 read 'C:\\ProgramData\\MeshLink\\MeshLink.conf'
+  $0 write /tmp/MESHLINK.ZIP 'C:\\MESHLINK.ZIP'
 EOF
     exit 1
     ;;

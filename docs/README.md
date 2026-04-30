@@ -15,5 +15,6 @@
 3. `docs/architecture/admin-console.md`
 4. `docs/api/service-contracts.md`
 5. `docs/operations/deployment-management-usage.md`
+6. `docs/operations/release-1.0.0-install-deploy.md`
 
 建议每次涉及协议、模块边界或关键流程的改动，都同步更新对应文档。

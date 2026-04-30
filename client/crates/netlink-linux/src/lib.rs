@@ -1,6 +1,7 @@
-use std::{collections::BTreeSet, path::Path, process::Command};
+use std::{collections::BTreeSet, path::Path, process::Command, sync::Mutex};
 
 use anyhow::{bail, Context, Result};
+use tracing::info;
 use wg_manager::{DesiredState, Endpoint, WireGuardBackend};
 
 mod public_udp_proxy;
@@ -9,18 +10,56 @@ pub use public_udp_proxy::{ObservedRemoteEndpoint, ProxyPeerHandle, PublicUdpPro
 
 const IP_BIN_PRIMARY: &str = "/usr/sbin/ip";
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct LinuxWireGuardBackend;
+#[derive(Debug, Default)]
+pub struct LinuxWireGuardBackend {
+    last_desired: Mutex<Option<DesiredState>>,
+}
 
 impl LinuxWireGuardBackend {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
 impl WireGuardBackend for LinuxWireGuardBackend {
     fn reconcile(&self, desired: &DesiredState) -> Result<()> {
-        reconcile_linux(desired)
+        let mut last_desired = self
+            .last_desired
+            .lock()
+            .map_err(|_| anyhow::anyhow!("linux wireguard backend state lock poisoned"))?;
+        let endpoint_only_change = last_desired
+            .as_ref()
+            .map(|previous| equivalent_except_endpoints(previous, desired))
+            .unwrap_or(false);
+
+        if endpoint_only_change {
+            let changed_peer_ids = changed_endpoint_peer_ids(
+                last_desired
+                    .as_ref()
+                    .expect("endpoint-only change has previous desired state"),
+                desired,
+            );
+            if !changed_peer_ids.is_empty() {
+                if should_incrementally_reconcile_endpoints(&changed_peer_ids) {
+                    info!(
+                        changed_peers = ?changed_peer_ids,
+                        "reconciling single wireguard endpoint change"
+                    );
+                    reconcile_linux_endpoints(desired, &changed_peer_ids)?;
+                } else {
+                    info!(
+                        changed_peers = ?changed_peer_ids,
+                        "reconciling full wireguard state for multi-peer endpoint change"
+                    );
+                    reconcile_linux(desired)?;
+                }
+            }
+        } else {
+            reconcile_linux(desired)?;
+        }
+
+        *last_desired = Some(desired.clone());
+        Ok(())
     }
 }
 
@@ -54,6 +93,54 @@ fn reconcile_linux(desired: &DesiredState) -> Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn reconcile_linux(_desired: &DesiredState) -> Result<()> {
     bail!("linux wireguard backend is only available on Linux")
+}
+
+#[cfg(target_os = "linux")]
+fn reconcile_linux_endpoints(
+    desired: &DesiredState,
+    changed_peer_ids: &BTreeSet<String>,
+) -> Result<()> {
+    wireguard_uapi::apply_endpoint_config(desired, changed_peer_ids)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reconcile_linux_endpoints(
+    _desired: &DesiredState,
+    _changed_peer_ids: &BTreeSet<String>,
+) -> Result<()> {
+    bail!("linux wireguard backend is only available on Linux")
+}
+
+fn equivalent_except_endpoints(left: &DesiredState, right: &DesiredState) -> bool {
+    left.interface_name == right.interface_name
+        && left.private_key == right.private_key
+        && left.listen_port == right.listen_port
+        && left.address_cidr == right.address_cidr
+        && left.peers.len() == right.peers.len()
+        && left
+            .peers
+            .iter()
+            .zip(right.peers.iter())
+            .all(|(left_peer, right_peer)| {
+                left_peer.peer_id == right_peer.peer_id
+                    && left_peer.public_key == right_peer.public_key
+                    && left_peer.allowed_ips == right_peer.allowed_ips
+                    && left_peer.persistent_keepalive_seconds
+                        == right_peer.persistent_keepalive_seconds
+            })
+}
+
+fn changed_endpoint_peer_ids(left: &DesiredState, right: &DesiredState) -> BTreeSet<String> {
+    left.peers
+        .iter()
+        .zip(right.peers.iter())
+        .filter(|(left_peer, right_peer)| left_peer.endpoint != right_peer.endpoint)
+        .map(|(_, right_peer)| right_peer.peer_id.clone())
+        .collect()
+}
+
+fn should_incrementally_reconcile_endpoints(changed_peer_ids: &BTreeSet<String>) -> bool {
+    changed_peer_ids.len() == 1
 }
 
 #[cfg(target_os = "linux")]
@@ -196,6 +283,7 @@ fn run(program: &str, args: &[&str]) -> Result<std::process::Output> {
 #[cfg(target_os = "linux")]
 mod wireguard_uapi {
     use std::{
+        collections::BTreeSet,
         ffi::{CStr, CString},
         io, mem,
         net::IpAddr,
@@ -345,6 +433,47 @@ mod wireguard_uapi {
 
         Err(io::Error::last_os_error())
             .context("apply wireguard configuration through embeddable UAPI")
+    }
+
+    pub fn apply_endpoint_config(
+        desired: &DesiredState,
+        changed_peer_ids: &BTreeSet<String>,
+    ) -> Result<()> {
+        let mut peers = Vec::<Box<wg_peer>>::new();
+
+        for desired_peer in &desired.peers {
+            if !changed_peer_ids.contains(&desired_peer.peer_id) {
+                continue;
+            }
+            let mut peer = zeroed_peer();
+            peer.flags = WGPEER_HAS_PUBLIC_KEY;
+            peer.public_key = decode_key(&desired_peer.public_key)
+                .with_context(|| format!("decode public key for peer {}", desired_peer.peer_id))?;
+            peer.endpoint = build_endpoint(desired_peer)
+                .with_context(|| format!("build endpoint for peer {}", desired_peer.peer_id))?;
+            peers.push(Box::new(peer));
+        }
+
+        link_peers(&mut peers);
+
+        let mut device = zeroed_device();
+        set_device_name(&mut device.name, &desired.interface_name)?;
+        device.first_peer = peers
+            .first_mut()
+            .map(|peer| peer.as_mut() as *mut wg_peer)
+            .unwrap_or(ptr::null_mut());
+        device.last_peer = peers
+            .last_mut()
+            .map(|peer| peer.as_mut() as *mut wg_peer)
+            .unwrap_or(ptr::null_mut());
+
+        let rc = unsafe { wg_set_device(&mut device) };
+        if rc == 0 {
+            return Ok(());
+        }
+
+        Err(io::Error::last_os_error())
+            .context("apply wireguard endpoint configuration through embeddable UAPI")
     }
 
     pub fn latest_handshake_timestamp(interface_name: &str, peer_public_key: &str) -> Result<u64> {
@@ -581,8 +710,12 @@ mod wireguard_uapi {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_interface_addresses, parse_route_destinations};
+    use super::{
+        changed_endpoint_peer_ids, equivalent_except_endpoints, parse_interface_addresses,
+        parse_route_destinations, should_incrementally_reconcile_endpoints,
+    };
     use std::collections::BTreeSet;
+    use wg_manager::{DesiredPeer, DesiredState, Endpoint};
 
     #[test]
     fn parse_interface_addresses_ignores_other_columns() {
@@ -603,5 +736,79 @@ mod tests {
             parsed,
             BTreeSet::from(["10.20.0.0/24".to_string(), "100.64.0.2".to_string()])
         );
+    }
+
+    #[test]
+    fn equivalent_except_endpoints_accepts_endpoint_only_changes() {
+        let mut next = desired_state();
+        next.peers[0].endpoint = Endpoint {
+            host: "192.0.2.20".to_string(),
+            port: 51830,
+        };
+
+        assert!(equivalent_except_endpoints(&desired_state(), &next));
+    }
+
+    #[test]
+    fn equivalent_except_endpoints_rejects_route_changes() {
+        let mut next = desired_state();
+        next.peers[0].allowed_ips.push("10.20.0.0/24".to_string());
+
+        assert!(!equivalent_except_endpoints(&desired_state(), &next));
+    }
+
+    #[test]
+    fn changed_endpoint_peer_ids_returns_only_touched_peers() {
+        let mut previous = desired_state();
+        previous.peers.push(DesiredPeer {
+            peer_id: "peer-b".to_string(),
+            public_key: "public-key-b".to_string(),
+            endpoint: Endpoint {
+                host: "192.0.2.30".to_string(),
+                port: 51820,
+            },
+            allowed_ips: vec!["100.64.0.3/32".to_string()],
+            persistent_keepalive_seconds: Some(15),
+        });
+        let mut next = previous.clone();
+        next.peers[1].endpoint = Endpoint {
+            host: "192.0.2.31".to_string(),
+            port: 51821,
+        };
+
+        assert_eq!(
+            changed_endpoint_peer_ids(&previous, &next),
+            BTreeSet::from(["peer-b".to_string()])
+        );
+    }
+
+    #[test]
+    fn endpoint_reconcile_is_incremental_for_one_peer_only() {
+        assert!(should_incrementally_reconcile_endpoints(&BTreeSet::from([
+            "peer-a".to_string()
+        ])));
+
+        assert!(!should_incrementally_reconcile_endpoints(&BTreeSet::from(
+            ["peer-a".to_string(), "peer-b".to_string()]
+        )));
+    }
+
+    fn desired_state() -> DesiredState {
+        DesiredState {
+            interface_name: "sdwan0".to_string(),
+            private_key: "private-key".to_string(),
+            listen_port: 51820,
+            address_cidr: "100.64.0.1/32".to_string(),
+            peers: vec![DesiredPeer {
+                peer_id: "peer-a".to_string(),
+                public_key: "public-key".to_string(),
+                endpoint: Endpoint {
+                    host: "192.0.2.10".to_string(),
+                    port: 51820,
+                },
+                allowed_ips: vec!["100.64.0.2/32".to_string()],
+                persistent_keepalive_seconds: Some(15),
+            }],
+        }
     }
 }

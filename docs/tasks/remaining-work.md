@@ -291,3 +291,24 @@ Verification:
 
 1. `./scripts/build-server.sh`
 2. `cd server && go test ./...`
+
+### TASK-029 Harden Windows and Linux data-plane stability before 1.0.0
+
+Status: `in_progress`
+
+Deliverables:
+
+1. `agent-core` keeps explicit per-peer path state, attempt generations, and
+   stale punch-result protection for direct, relay, and recovery transitions
+2. Same-LAN candidates remain preferred over observed public/gateway endpoints,
+   and relay is released only after direct recovery is confirmed
+3. Windows endpoint-only runtime updates avoid unnecessary service restarts but
+   fall back to restart if the runtime update fails
+4. `run-stability-gate.sh` repeats Linux and Windows data-plane acceptance for
+   the configured release-gate count
+
+Verification:
+
+1. `cargo test --manifest-path client/Cargo.toml -p agent-core -p netlink-linux -p wintun-windows`
+2. `bash -n tests/nat-lab/run-stability-gate.sh tests/nat-lab/run-linux-iperf3.sh tests/windows-vm/run-phase08-validation.sh`
+3. `MESHLINK_LAB_TOPOLOGY=dual-nat MESHLINK_STABILITY_RUNS=3 ./tests/nat-lab/run-stability-gate.sh`

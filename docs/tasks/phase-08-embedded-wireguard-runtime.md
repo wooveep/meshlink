@@ -108,6 +108,30 @@ Verification:
 1. `MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/nat-lab/run-phase08-routes.sh`
 2. `MESHLINK_LAB_TOPOLOGY=dual-nat ./tests/windows-vm/run-phase08-validation.sh`
 
+### TASK-029 Harden Windows and Linux data-plane stability before 1.0.0
+
+Status: `in_progress`
+
+Required behavior:
+
+1. The client keeps per-peer path state with generation-guarded direct probes,
+   direct-active confirmation, relay fallback, and direct-recovery probing.
+2. Same-LAN candidates stay preferred over observed public/gateway candidates,
+   and late punch failures cannot overwrite a newer direct success.
+3. Relay remains a fallback path and is not released until direct has been
+   locally or remotely confirmed.
+4. The runtime can verify WireGuard peer endpoints after apply when
+   `MESHLINK_VERIFY_ENDPOINT_APPLY=1` is set.
+5. A repeatable stability gate runs Linux direct, Linux 300-second bidirectional
+   iperf3, Linux relay/recovery, Linux routed-subnet regression, and Windows
+   phase08 validation for `MESHLINK_STABILITY_RUNS` consecutive rounds.
+
+Verification:
+
+1. `cargo test --manifest-path client/Cargo.toml -p agent-core -p netlink-linux -p wintun-windows`
+2. `bash -n tests/nat-lab/run-stability-gate.sh tests/nat-lab/run-linux-iperf3.sh tests/windows-vm/run-phase08-validation.sh`
+3. `MESHLINK_LAB_TOPOLOGY=dual-nat MESHLINK_STABILITY_RUNS=3 ./tests/nat-lab/run-stability-gate.sh`
+
 ## Notes
 
 1. Linux still assumes kernel WireGuard support and root privileges; only the
@@ -122,4 +146,6 @@ Verification:
    the dual-NAT lab to avoid same-side NAT port collisions with Linux guests.
 6. Manual Windows validation remains useful for deeper debugging, but scripted
    acceptance now covers direct, relay fallback, recovery, route advertisement,
-   and route withdrawal.
+   and route withdrawal. The 1.0.0 release gate is TASK-029, which requires
+   consecutive stability-gate passes rather than a single successful phase08
+   run.
